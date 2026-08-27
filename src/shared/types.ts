@@ -111,7 +111,14 @@ export type RuntimeMessage =
   | { type: "SNAPSHOT"; context: PageContext }
   | { type: "APPLY_PATCH"; patch: Patch }
   | { type: "RESET"; tabId?: number }
-  | { type: "PATCH_APPLIED"; ok: boolean; error?: string }
+  | {
+      type: "PATCH_APPLIED";
+      ok: boolean;
+      error?: string;
+      opErrors?: string[];
+      runtimeStarted?: boolean;
+    }
+  | { type: "RUNTIME_ERROR"; message: string; fatal?: boolean; tabId?: number }
   | { type: "RESET_DONE" }
   | {
       type: "PROMPT";
@@ -163,6 +170,8 @@ export interface ChatSession {
   messages: ChatMessage[];
   history: Array<{ role: "user" | "assistant"; content: string }>;
   activity: ActivityLine[];
+  /** Last sandbox/runtime failure — included on the next restyle turn. */
+  lastRuntimeError?: string;
 }
 
 export interface SessionSummary {
