@@ -37,11 +37,11 @@ export function createStatusChip(
       chip.classList.toggle("is-offline", !res.ok);
       chip.title = res.ok
         ? "Companion connected — click for logs"
-        : "Companion not responding — npm run companion";
+        : "Companion not responding — run npm run dev";
     } catch {
       chip.classList.remove("is-online");
       chip.classList.add("is-offline");
-      chip.title = "Companion offline — npm run companion";
+      chip.title = "Companion offline — run npm run dev";
     }
   }
 

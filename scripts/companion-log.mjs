@@ -40,13 +40,15 @@ export function logPath() {
   return LOG_PATH;
 }
 
-export function writeLog(line, { echo = true } = {}) {
+export function writeLog(line, { echo = true, ring: useRing = true } = {}) {
   const text = stripAnsi(line).replace(/\s+$/, "");
   if (!text) return;
   const stamped = `${new Date().toISOString()} ${text}`;
   if (echo) console.log(stamped);
-  ring.push(stamped);
-  if (ring.length > MAX_RING) ring.splice(0, ring.length - MAX_RING);
+  if (useRing) {
+    ring.push(stamped);
+    if (ring.length > MAX_RING) ring.splice(0, ring.length - MAX_RING);
+  }
   try {
     ensureDir();
     rotateIfNeeded();
@@ -60,7 +62,8 @@ export function ingestRaw(chunk, stream = "out") {
   const text = stripAnsi(chunk);
   for (const part of text.split(/\r?\n/)) {
     const line = part.trimEnd();
-    if (line) writeLog(`[${stream}] ${line}`);
+    // Raw NDJSON: file only — not terminal, not the UI ring buffer.
+    if (line) writeLog(`[${stream}] ${line}`, { echo: false, ring: false });
   }
 }
 

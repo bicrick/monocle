@@ -17,8 +17,11 @@ import {
   beginRun,
   endRun,
   ingestChunk,
+  ingestStep,
+  ingestThinking,
   snapshot,
 } from "./companion-status.mjs";
+import { createStreamParser } from "./cli-stream.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.MONACLE_PORT || 8787);
@@ -79,7 +82,15 @@ function writeImages(images) {
 function runAgent(prompt, model) {
   const agent = resolveAgent();
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "monacle-cli-"));
-  const args = ["-p", "--trust", "--mode=ask", "--output-format", "text"];
+  // stream-json exposes thinking + tool steps (Cursor-agent UI shape).
+  const args = [
+    "-p",
+    "--trust",
+    "--mode=ask",
+    "--output-format",
+    "stream-json",
+    "--stream-partial-output",
+  ];
   if (model) args.push("--model", model);
   args.push(prompt);
 
@@ -90,7 +101,21 @@ function runAgent(prompt, model) {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    writeLog(`cli spawn ${agent} cwd=${cwd} timeout=${AGENT_TIMEOUT_MS}ms`);
+    // Plumbing stays in the log file; terminal shows agent steps.
+    writeLog(`cli spawn ${agent} timeout=${AGENT_TIMEOUT_MS}ms`, {
+      echo: false,
+    });
+    writeLog("Cursor agent started — streaming thinking & tools…");
+
+    const parser = createStreamParser({
+      onStep: (line) => {
+        writeLog(line);
+        ingestStep(line);
+      },
+      onThinking: (full) => {
+        ingestThinking(full);
+      },
+    });
 
     let settled = false;
     const finish = (fn) => {
@@ -99,19 +124,23 @@ function runAgent(prompt, model) {
       fn();
     };
 
-    let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
-      stdout += text;
-      ingestChunk(text);
+      // Keep raw NDJSON in the file only (not the terminal).
       ingestRaw(text, "out");
+      // Re-read: ingestRaw echoes via writeLog. Need to fix that.
+      parser.push(text);
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
       stderr += text;
+      // stderr rarely has useful agent UI; file it, surface short noise.
+      for (const line of text.split(/\r?\n/)) {
+        const t = line.trim();
+        if (t) writeLog(`[err] ${t}`, { echo: false, ring: false });
+      }
       ingestChunk(text);
-      ingestRaw(text, "err");
     });
 
     const timer = setTimeout(() => {
@@ -146,21 +175,23 @@ function runAgent(prompt, model) {
 
     child.on("close", (code) => {
       clearTimeout(timer);
-      writeLog(`cli exit ${code} stdout=${stdout.length}b stderr=${stderr.length}b`);
+      parser.flush();
+      const text = parser.finalText();
+      writeLog(`cli exit ${code} result=${text.length}b`, { echo: false });
       fs.rmSync(cwd, { recursive: true, force: true });
       if (code !== 0) {
         finish(() =>
           reject(
             new Error(
               stderr.trim() ||
-                stdout.trim() ||
+                text.trim() ||
                 `Cursor CLI exited ${code}. Try: agent login`,
             ),
           ),
         );
         return;
       }
-      finish(() => resolve(stdout.trim()));
+      finish(() => resolve(text.trim()));
     });
   });
 }
@@ -277,15 +308,14 @@ const server = http.createServer(async (req, res) => {
       const written = writeImages(body.images);
       imageDir = written.dir;
       writeLog(
-        `POST /restyle prompt=${JSON.stringify(String(body.prompt || "").slice(0, 80))} model=${body.model || "auto"}`,
+        `Restyle: ${JSON.stringify(String(body.prompt || "").slice(0, 80))}`,
       );
       beginRun(body.model);
       const text = await runAgent(
         buildPrompt(body, written.paths),
         body.model,
       );
-      writeLog(`POST /restyle ok text=${text.length}b`);
-      json(res, 200, { text, imagePaths: written.paths });
+      writeLog(`Restyle ready (${text.length} chars)`);      json(res, 200, { text, imagePaths: written.paths });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       writeLog(`POST /restyle fail ${message}`);
@@ -311,7 +341,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  writeLog(`Monacle companion listening on http://${HOST}:${PORT}`);
-  writeLog(`Full CLI log: ${logPath()}`);
-  writeLog("Uses your local Cursor CLI (agent login). GET /logs for the ring buffer.");
+  writeLog(`Companion ready on http://${HOST}:${PORT}`);
+  writeLog(`Log file: ${logPath()}`, { echo: false });
+  writeLog("Streaming Cursor agent thinking & tools into this terminal.");
 });

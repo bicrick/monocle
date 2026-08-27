@@ -8,8 +8,8 @@
       body {
         margin: 0;
         padding: 0;
-        width: 100%;
-        height: 100%;
+        width: 0;
+        height: 0;
         overflow: hidden;
         background: transparent;
       }
@@ -18,12 +18,79 @@
   <body>
     <script>
       (function () {
-        var hostState = { media: [], viewport: { width: 0, height: 0 }, queries: {} };
+        var hostState = {
+          media: [],
+          viewport: { width: 0, height: 0 },
+          queries: {},
+        };
         var runtimeCleanups = [];
-        var runtimeRafs = [];
+        var pendingRafs = {};
+        var rafSeq = 1;
         var runtimeTimeouts = [];
-        var runtimeCanvas = null;
+        var offscreenCanvas = null;
+        var wrappedCanvas = null;
         var runtimeToken = "";
+        var pendingStyles = [];
+        var styleFlushScheduled = false;
+
+        // Mirror src/sandbox/safeCanvasDim.ts — sandbox.html is copied raw.
+        function nextCanvasDim(current, requested) {
+          var n = typeof requested === "number" ? requested : Number(requested);
+          if (!isFinite(n) || n < 1) return null;
+          var rounded = Math.round(n);
+          if (rounded === current) return null;
+          return rounded;
+        }
+
+        function commitCanvasDim(canvas, prop, requested) {
+          var next = nextCanvasDim(canvas[prop], requested);
+          if (next == null) return false;
+          canvas[prop] = next;
+          return true;
+        }
+
+        function wrapOffscreen(raw) {
+          return new Proxy(raw, {
+            get: function (target, prop, receiver) {
+              var val = Reflect.get(target, prop, receiver);
+              if (typeof val === "function") return val.bind(target);
+              return val;
+            },
+            set: function (target, prop, value) {
+              if (prop === "width" || prop === "height") {
+                commitCanvasDim(target, prop, value);
+                return true;
+              }
+              target[prop] = value;
+              return true;
+            },
+          });
+        }
+
+        function syncOffscreenToViewport() {
+          if (!offscreenCanvas || !hostState.viewport) return;
+          commitCanvasDim(offscreenCanvas, "width", hostState.viewport.width);
+          commitCanvasDim(offscreenCanvas, "height", hostState.viewport.height);
+        }
+
+        try {
+          Object.defineProperty(window, "innerWidth", {
+            configurable: true,
+            get: function () {
+              return (hostState.viewport && hostState.viewport.width) || 0;
+            },
+          });
+          Object.defineProperty(window, "innerHeight", {
+            configurable: true,
+            get: function () {
+              return (hostState.viewport && hostState.viewport.height) || 0;
+            },
+          });
+        } catch (e) {}
+
+        window.cancelAnimationFrame = function (id) {
+          delete pendingRafs[id];
+        };
 
         function postParent(payload) {
           parent.postMessage(
@@ -48,18 +115,137 @@
             } catch (e) {}
           }
           runtimeCleanups = [];
-          for (var j = 0; j < runtimeRafs.length; j++) {
-            cancelAnimationFrame(runtimeRafs[j]);
-          }
-          runtimeRafs = [];
+          pendingRafs = {};
+          wrappedCanvas = null;
+          pendingStyles = [];
+          styleFlushScheduled = false;
           for (var k = 0; k < runtimeTimeouts.length; k++) {
             clearTimeout(runtimeTimeouts[k]);
           }
           runtimeTimeouts = [];
-          if (runtimeCanvas && runtimeCanvas.parentNode) {
-            runtimeCanvas.parentNode.removeChild(runtimeCanvas);
+        }
+
+        function applyHostState(data) {
+          if (data.media) hostState.media = data.media;
+          if (data.viewport) {
+            hostState.viewport = data.viewport;
+            syncOffscreenToViewport();
           }
-          runtimeCanvas = null;
+          if (data.queries) hostState.queries = data.queries;
+        }
+
+        function flushRafs(time) {
+          var ids = Object.keys(pendingRafs);
+          for (var i = 0; i < ids.length; i++) {
+            var id = ids[i];
+            var fn = pendingRafs[id];
+            delete pendingRafs[id];
+            if (typeof fn === "function") {
+              try {
+                fn(time);
+              } catch (e) {
+                postParent({
+                  type: "monacle-runtime-error",
+                  message: e && e.message ? e.message : String(e),
+                });
+              }
+            }
+          }
+        }
+
+        // Batch style writes so kelp sway is cheap.
+        function postStyle(selector, index, props) {
+          var flat = {};
+          if (props && typeof props === "object") {
+            for (var key in props) {
+              if (Object.prototype.hasOwnProperty.call(props, key)) {
+                var v = props[key];
+                if (typeof v === "string" || typeof v === "number") {
+                  flat[key] = String(v);
+                }
+              }
+            }
+          }
+          pendingStyles.push({ selector: selector, index: index, props: flat });
+          if (!styleFlushScheduled) {
+            styleFlushScheduled = true;
+            setTimeout(flushPendingStyles, 0);
+          }
+        }
+
+        function flushPendingStyles() {
+          styleFlushScheduled = false;
+          if (!pendingStyles.length) return;
+          var batch = pendingStyles;
+          pendingStyles = [];
+          var merged = {};
+          for (var i = 0; i < batch.length; i++) {
+            var item = batch[i];
+            var key = item.selector + "\0" + item.index;
+            if (!merged[key]) {
+              merged[key] = {
+                selector: item.selector,
+                index: item.index,
+                props: {},
+              };
+            }
+            var props = item.props || {};
+            for (var p in props) {
+              if (Object.prototype.hasOwnProperty.call(props, p)) {
+                merged[key].props[p] = props[p];
+              }
+            }
+          }
+          for (var k in merged) {
+            if (!Object.prototype.hasOwnProperty.call(merged, k)) continue;
+            var m = merged[k];
+            postParent({
+              type: "monacle-host-call",
+              method: "style",
+              args: [m.selector, m.index, m.props],
+            });
+          }
+        }
+
+        function wrapQueryNodes(selector, nodes) {
+          var out = [];
+          for (var i = 0; i < nodes.length; i++) {
+            out.push(wrapQueryNode(selector, i, nodes[i]));
+          }
+          return out;
+        }
+
+        function wrapQueryNode(selector, index, node) {
+          if (!node || typeof node !== "object") return node;
+          var styleProxy = new Proxy(
+            {},
+            {
+              set: function (_target, prop, value) {
+                if (typeof prop !== "string") return true;
+                var props = {};
+                props[prop] = value == null ? "" : String(value);
+                postStyle(selector, index, props);
+                return true;
+              },
+              get: function (target, prop) {
+                return target[prop];
+              },
+            },
+          );
+          return new Proxy(node, {
+            get: function (target, prop, receiver) {
+              if (prop === "style") return styleProxy;
+              return Reflect.get(target, prop, receiver);
+            },
+            set: function (target, prop, value) {
+              if (prop === "style" && value && typeof value === "object") {
+                postStyle(selector, index, value);
+                return true;
+              }
+              target[prop] = value;
+              return true;
+            },
+          });
         }
 
         function buildMonacle() {
@@ -70,7 +256,8 @@
                 method: "query",
                 args: [selector],
               });
-              return (hostState.queries && hostState.queries[selector]) || [];
+              var nodes = (hostState.queries && hostState.queries[selector]) || [];
+              return wrapQueryNodes(selector, nodes);
             },
             insert: function (html, opts) {
               postParent({
@@ -82,37 +269,19 @@
             },
             overlay: null,
             canvas: function () {
-              if (!runtimeCanvas) {
-                runtimeCanvas = document.createElement("canvas");
-                runtimeCanvas.setAttribute("data-monacle-canvas", "1");
-                runtimeCanvas.style.position = "fixed";
-                runtimeCanvas.style.inset = "0";
-                runtimeCanvas.style.width = "100%";
-                runtimeCanvas.style.height = "100%";
-                runtimeCanvas.style.pointerEvents = "none";
-                document.body.appendChild(runtimeCanvas);
+              if (!offscreenCanvas) {
+                throw new Error("Overlay canvas is not ready");
               }
-              var w =
-                (hostState.viewport && hostState.viewport.width) ||
-                window.innerWidth;
-              var h =
-                (hostState.viewport && hostState.viewport.height) ||
-                window.innerHeight;
-              if (runtimeCanvas.width !== w) runtimeCanvas.width = w;
-              if (runtimeCanvas.height !== h) runtimeCanvas.height = h;
-              return runtimeCanvas;
+              syncOffscreenToViewport();
+              if (!wrappedCanvas) wrappedCanvas = wrapOffscreen(offscreenCanvas);
+              return wrappedCanvas;
             },
             media: function () {
               return hostState.media || [];
             },
             raf: function (fn) {
-              var id = requestAnimationFrame(function (t) {
-                runtimeRafs = runtimeRafs.filter(function (x) {
-                  return x !== id;
-                });
-                fn(t);
-              });
-              runtimeRafs.push(id);
+              var id = rafSeq++;
+              pendingRafs[id] = fn;
               return id;
             },
             timeout: function (fn, ms) {
@@ -177,7 +346,6 @@
         }
 
         function runLiveRuntime(code) {
-          stopRuntimeLocal();
           try {
             var run = new Function(
               "monacle",
@@ -204,19 +372,27 @@
           }
 
           if (data.type === "monacle-host-state") {
-            hostState.media = data.media || [];
-            hostState.viewport = data.viewport || hostState.viewport;
-            hostState.queries = data.queries || hostState.queries;
+            applyHostState(data);
+            return;
+          }
+
+          if (data.type === "monacle-raf-tick") {
+            applyHostState(data);
+            flushRafs(data.time);
             return;
           }
 
           if (data.type === "monacle-runtime-stop") {
             stopRuntimeLocal();
+            offscreenCanvas = null;
             return;
           }
 
           if (data.type === "monacle-runtime-start") {
+            stopRuntimeLocal();
             if (data.token) runtimeToken = data.token;
+            applyHostState(data);
+            offscreenCanvas = data.canvas || null;
             runLiveRuntime(data.code || "");
           }
         });

@@ -49,8 +49,9 @@ async function pingCompanion(): Promise<void> {
       : "Logs: GET /logs on the companion";
   } catch {
     companionStatus.textContent =
-      "Companion: not running. In the repo: npm run companion";
-    companionLog.textContent = "Logs: start the companion, then check logs/companion.log";
+      "Companion: not running. In the repo: npm run dev";
+    companionLog.textContent =
+      "Logs: npm run dev starts the companion; see logs/companion.log";
   }
 }
 

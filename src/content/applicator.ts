@@ -118,7 +118,10 @@ function applyInsert(op: PatchOp): void {
     const frag = document.createDocumentFragment();
     for (const node of Array.from(template.content.childNodes)) {
       if (node.nodeType === Node.ELEMENT_NODE) {
-        (node as Element).setAttribute(INSERT_MARK, "1");
+        const el = node as Element;
+        if (!el.hasAttribute(INSERT_MARK)) {
+          el.setAttribute(INSERT_MARK, "1");
+        }
       }
       frag.appendChild(node);
     }

@@ -35,7 +35,7 @@ Runs in the extension sandbox frame on the LIVE page (no chrome APIs). Use only:
 - monacle.query(selector) → Element[] (capped)
 - monacle.insert(html, { selector, position }) → Element[]
 - monacle.overlay → ShadowRoot | null
-- monacle.canvas() → full-viewport canvas in the overlay (pointer-events: none)
+- monacle.canvas() → full-viewport canvas in the overlay (pointer-events: none). Only assign canvas.width/height when the size actually changed; never on every frame.
 - monacle.media() → [{ tag, selector, rect, paused, currentTime, duration }]
 - monacle.raf(fn) / monacle.timeout(fn, ms) — tracked; cleaned on reset
 - monacle.onCleanup(fn) — register teardown (cancel loops)
@@ -53,7 +53,7 @@ EXAMPLE — ocean on YouTube watch (sketch; adapt selectors from snapshot):
     { "type": "hide", "selector": "#secondary" },
     { "type": "insert", "selector": "body", "position": "append", "html": "<div data-coral style=\\"position:fixed;left:0;right:0;bottom:0;height:18vh;pointer-events:none;background:linear-gradient(transparent,#062a1a);\\"></div>" }
   ],
-  "runtime": "const c = monacle.canvas(); const ctx = c.getContext('2d'); let t = 0; let id; function frame(){ t += 0.02; c.width = innerWidth; c.height = innerHeight; ctx.clearRect(0,0,c.width,c.height); const media = monacle.media()[0]; for (let i = 0; i < 40; i++){ const x = (i*37 + t*30) % c.width; const y = (Math.sin(t + i)*40 + c.height*0.7); ctx.fillStyle = 'rgba(180,230,255,0.25)'; ctx.beginPath(); ctx.arc(x,y,2+i%3,0,6.28); ctx.fill(); } if (media){ /* leave player clear — host masks cutouts */ } id = monacle.raf(frame); } id = monacle.raf(frame); monacle.onCleanup(() => cancelAnimationFrame(id));"
+  "runtime": "const c = monacle.canvas(); const ctx = c.getContext('2d'); let t = 0; let id; function frame(){ t += 0.02; if (c.width !== innerWidth && innerWidth > 0) c.width = innerWidth; if (c.height !== innerHeight && innerHeight > 0) c.height = innerHeight; ctx.clearRect(0,0,c.width,c.height); const media = monacle.media()[0]; for (let i = 0; i < 40; i++){ const x = (i*37 + t*30) % c.width; const y = (Math.sin(t + i)*40 + c.height*0.7); ctx.fillStyle = 'rgba(180,230,255,0.25)'; ctx.beginPath(); ctx.arc(x,y,2+i%3,0,6.28); ctx.fill(); } if (media){ /* leave player clear — host masks cutouts */ } id = monacle.raf(frame); } id = monacle.raf(frame); monacle.onCleanup(() => cancelAnimationFrame(id));"
 }
 
 Cinema chrome-hide (CSS/ops) is only HALF of an environmental request — always add overlayHtml + runtime for motion.

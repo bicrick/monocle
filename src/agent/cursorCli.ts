@@ -143,7 +143,7 @@ export class CursorCliProvider implements AgentProvider {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const hint = /fetch|Failed|ECONNREFUSED|NetworkError/i.test(message)
-        ? "Start the local companion on this machine: npm run companion — then agent login."
+        ? "Start the local stack: npm run dev — then agent login if prompted."
         : message;
       yield { type: "error", message: hint };
       yield { type: "done" };
@@ -166,12 +166,12 @@ async function readCliStatus(base: string): Promise<string> {
       lines?: string[];
       raw?: string[];
     };
-    const raw = data.raw?.length ? data.raw : data.lines ?? [];
-    if (!data.running && !raw.length) return "";
+    // Prefer human agent steps (thinking / tools), not raw NDJSON plumbing.
+    const steps = data.lines?.length ? data.lines : data.raw ?? [];
+    if (!data.running && !steps.length) return "";
     const parts: string[] = [];
     if (data.summary) parts.push(data.summary);
-    if (data.model && data.model !== "auto") parts.push(`model ${data.model}`);
-    const excerpt = raw.slice(-30);
+    const excerpt = steps.slice(-30);
     if (excerpt.length) parts.push(excerpt.join("\n"));
     return parts.join("\n");
   } catch {

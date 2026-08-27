@@ -10,8 +10,10 @@ This is a Chrome extension built with Vite + `@crxjs/vite-plugin`. During local 
 ## Prefer `npm run dev`
 
 - Use `npm run dev` (not one-off `npm run build`) while editing extension code.
-- After changes, rely on Vite HMR / CRXJS reload. Do not tell the user to rebuild `dist/` or reload Chrome unless they asked for a production build (`npm run build`, `npm run verify`).
-- `npm run build` is for production / verify only.
+- `npm run dev` starts **both** the Vite/CRXJS server and the Cursor companion (`127.0.0.1:8787`). If either is already healthy, it leaves that process alone.
+- After changes, rely on Vite HMR / CRXJS reload. Do not tell the user to rebuild `dist/` or reload Chrome unless they asked for a production build (`npm run build`, `npm run verify`), or you are running `npm run loop` (which builds `dist/` for a reproducible Puppeteer load).
+- `npm run build` is for production / verify / the debug loop only.
+- Manual companion-only: `npm run companion`. Vite-only: `npm run dev:vite`.
 
 ## Check before starting
 
@@ -21,12 +23,13 @@ Typical Vite/CRXJS URL: `http://localhost:5173` (Vite default; often `[::1]:5173
 # already up? do not start a second server
 curl -sS -m 1 -o /dev/null -w "%{http_code}" http://localhost:5173/
 lsof -nP -iTCP:5173 -sTCP:LISTEN
+curl -sS -m 1 http://127.0.0.1:8787/health
 ```
 
-Also scan existing terminals for `vite` / `npm run dev`.
+Also scan existing terminals for `vite` / `npm run dev` / `companion`.
 
 - If a healthy Vite process is already serving: leave it alone. Never kill it.
-- If nothing is listening: start in the background from the repo root with PATH as needed:
+- If nothing is listening: start from the repo root with PATH as needed:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -35,6 +38,6 @@ npm run dev
 
 Working directory: `/Users/pbrown/Desktop/Monacle`.
 
-## Companion is separate
+## Debug loop
 
-`npm run companion` (`127.0.0.1:8787`) is the Cursor CLI bridge. Keep it running when testing Cursor CLI restyles. Do not treat it as a substitute for Vite. This rule is about the Vite/CRXJS dev server.
+`npm run loop` opens headed Chrome, loads `dist/`, hits the companion `/restyle` (or `--replay`), holds, and writes artifacts under `logs/loop/`. Use `--fixture` for the local blog page; default URL is bicrick.com/about. After a fail: fix, then `npm run loop:replay`.

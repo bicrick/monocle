@@ -46,6 +46,8 @@ let timeoutIds: number[] = [];
 let lastRuntime = "";
 let maskObserver: ResizeObserver | null = null;
 let maskRaf = 0;
+let lastMaskKey = "";
+let maskPollId = 0;
 
 function safeQuery(selector: string): Element[] {
   try {
@@ -77,7 +79,10 @@ function ensureRuntimeStyle(): HTMLStyleElement {
 
 function markInserted(node: Node): void {
   if (node.nodeType === Node.ELEMENT_NODE) {
-    (node as Element).setAttribute(INSERT_MARK, "1");
+    const el = node as Element;
+    if (!el.hasAttribute(INSERT_MARK)) {
+      el.setAttribute(INSERT_MARK, "1");
+    }
   }
 }
 
@@ -155,8 +160,11 @@ function collectMedia(): MediaRect[] {
 export function applyMediaCutoutMask(host: HTMLElement): void {
   const medias = collectMedia();
   if (!medias.length) {
-    host.style.webkitMaskImage = "";
-    host.style.maskImage = "";
+    if (lastMaskKey !== "") {
+      host.style.webkitMaskImage = "";
+      host.style.maskImage = "";
+      lastMaskKey = "";
+    }
     return;
   }
   const holes = medias
@@ -165,6 +173,8 @@ export function applyMediaCutoutMask(host: HTMLElement): void {
       return `linear-gradient(#000 0 0) ${x}px ${y}px / ${width}px ${height}px no-repeat`;
     })
     .join(", ");
+  if (holes === lastMaskKey) return;
+  lastMaskKey = holes;
   // Full cover then punch transparent holes via mask-composite
   const mask = `linear-gradient(#000 0 0), ${holes}`;
   host.style.maskImage = mask;
@@ -181,18 +191,25 @@ export function applyMediaCutoutMask(host: HTMLElement): void {
   ).webkitMaskComposite = "xor";
 }
 
+function scheduleCutout(host: HTMLElement): void {
+  if (maskRaf) return;
+  maskRaf = requestAnimationFrame(() => {
+    maskRaf = 0;
+    applyMediaCutoutMask(host);
+  });
+}
+
 export function startMediaCutoutTracking(host: HTMLElement): void {
   stopMediaCutoutTracking();
-  const tick = () => {
-    applyMediaCutoutMask(host);
-    maskRaf = requestAnimationFrame(tick);
-  };
-  maskRaf = requestAnimationFrame(tick);
-  maskObserver = new ResizeObserver(() => applyMediaCutoutMask(host));
+  applyMediaCutoutMask(host);
+  // Coalesce resize/rect changes — do not rewrite mask styles every display frame.
+  maskObserver = new ResizeObserver(() => scheduleCutout(host));
   maskObserver.observe(document.documentElement);
   for (const el of document.querySelectorAll("video, audio")) {
     maskObserver.observe(el);
   }
+  // Occasional poll for media that moves without resizing (player layout shifts).
+  maskPollId = window.setInterval(() => scheduleCutout(host), 250);
 }
 
 export function stopMediaCutoutTracking(): void {
@@ -200,8 +217,13 @@ export function stopMediaCutoutTracking(): void {
     cancelAnimationFrame(maskRaf);
     maskRaf = 0;
   }
+  if (maskPollId) {
+    clearInterval(maskPollId);
+    maskPollId = 0;
+  }
   maskObserver?.disconnect();
   maskObserver = null;
+  lastMaskKey = "";
 }
 
 function guardProtectedMutation(el: Element, action: string): boolean {
@@ -277,8 +299,8 @@ function buildApi(): MonacleHostApi {
       if (!canvas) {
         canvas = document.createElement("canvas");
         canvas.setAttribute("data-monacle-canvas", "1");
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+        canvas.width = Math.max(1, window.innerWidth || 1);
+        canvas.height = Math.max(1, window.innerHeight || 1);
         Object.assign(canvas.style, {
           position: "fixed",
           inset: "0",
@@ -327,6 +349,26 @@ function serializeEl(el: Element): SerializedNode {
     className: typeof el.className === "string" ? el.className : "",
     rect: { x: r.x, y: r.y, width: r.width, height: r.height },
   };
+}
+
+function applyLiveStyle(
+  selector: string,
+  index: number,
+  props: Record<string, string>,
+): void {
+  const els = safeQuery(selector);
+  const el = els[index];
+  if (!(el instanceof HTMLElement)) return;
+  if (isProtectedElement(el) && el.matches("video, audio")) return;
+  for (const [prop, value] of Object.entries(props)) {
+    if (typeof value !== "string") continue;
+    const cssProp = prop.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+    try {
+      el.style.setProperty(cssProp, value);
+    } catch {
+      // ignore invalid style props
+    }
+  }
 }
 
 function stopRuntimeEngine(): void {
@@ -384,11 +426,13 @@ export function runRuntime(code: string): void {
           "append",
       ).map(serializeEl),
     css: (text) => api.css(text),
+    style: applyLiveStyle,
     media: collectMedia,
     viewport: () => ({
       width: window.innerWidth,
       height: window.innerHeight,
     }),
+    canvas: () => api.canvas(),
   }).catch((err) => {
     console.warn(
       "[Monacle] sandbox runtime failed to start",

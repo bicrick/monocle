@@ -39,7 +39,7 @@ export function createLogDrawer(host: HTMLElement): {
   });
 
   async function refresh(): Promise<void> {
-    const pathEl = summary.querySelector(".log-drawer-path");
+    const pathEl = summary.querySelector(".log-drawer-path") as HTMLElement | null;
     try {
       const res = await fetch(`${base.replace(/\/$/, "")}/logs`);
       if (!res.ok) throw new Error(String(res.status));
@@ -63,7 +63,7 @@ export function createLogDrawer(host: HTMLElement): {
     } catch {
       if (pathEl) pathEl.textContent = "";
       pre.textContent =
-        "Companion not reachable. In the repo: npm run companion";
+        "Companion not reachable. In the repo: npm run dev";
     }
   }
 
@@ -120,6 +120,7 @@ export function createLogDrawer(host: HTMLElement): {
     },
     start(baseUrl: string) {
       if (baseUrl) base = baseUrl;
+      void refresh();
     },
     isOpen() {
       return root.open;
