@@ -1,14 +1,31 @@
-import { isProtectedElement, isRuntimeSourceAllowed } from "../patches/schema";
+import {
+  isProtectedElement,
+  isRuntimeSourceAllowed,
+  unsupportedRuntimeReason,
+} from "../patches/schema";
+import { capCanvasSize } from "../sandbox/safeCanvasDim";
+import { isolateVoid } from "./isolate";
 import {
   startSandboxRuntime,
   stopSandboxRuntime,
+  destroySandboxRuntime,
   type SerializedNode,
 } from "./sandboxFrame";
-
-const INSERT_MARK = "data-monacle-insert";
+import {
+  buildThreeApi,
+  stopThreeStage,
+  destroyThreeStage,
+} from "./threeHost";
+import { reportRuntimeError } from "./runtimeErrors";
+const BATCH_MARK = "data-monacle-batch";
+const SCENE_ID = "monacle-scene";
 const RUNTIME_STYLE_ID = "monacle-runtime-css";
 const OVERLAY_ID = "monacle-overlay";
 const QUERY_CAP = 40;
+/** Cap runtime-created nodes per create/insert call. */
+const CREATE_CHILD_CAP = 80;
+/** Same budget as applicator inserts — oversized HTML can OOM the tab. */
+const MAX_CREATE_HTML = 200_000;
 
 type CleanupFn = () => void;
 
@@ -28,6 +45,15 @@ export interface MonacleHostApi {
     opts: {
       selector: string;
       position?: "before" | "after" | "prepend" | "append";
+      batchId?: string;
+    },
+  ): Element[];
+  create(
+    html: string,
+    opts?: {
+      selector?: string;
+      position?: "before" | "after" | "prepend" | "append";
+      batchId?: string;
     },
   ): Element[];
   overlay: ShadowRoot | null;
@@ -50,11 +76,21 @@ let lastMaskKey = "";
 let maskPollId = 0;
 
 function safeQuery(selector: string): Element[] {
+  const out: Element[] = [];
   try {
-    return Array.from(document.querySelectorAll(selector)).slice(0, QUERY_CAP);
+    out.push(...Array.from(document.querySelectorAll(selector)));
   } catch {
-    return [];
+    // invalid selector
   }
+  const shadow = getOverlayShadow();
+  if (shadow) {
+    try {
+      out.push(...Array.from(shadow.querySelectorAll(selector)));
+    } catch {
+      // invalid selector in shadow
+    }
+  }
+  return out.slice(0, QUERY_CAP);
 }
 
 export function getOverlayShadow(): ShadowRoot | null {
@@ -65,6 +101,70 @@ export function getOverlayShadow(): ShadowRoot | null {
 
 export function rememberOverlayShadow(host: Element, shadow: ShadowRoot): void {
   overlayShadows.set(host, shadow);
+}
+
+/** Ensure overlay host + #monacle-scene exist for runtime-created nodes. */
+export function ensureSceneRoot(): HTMLElement {
+  let host = document.getElementById(OVERLAY_ID) as HTMLElement | null;
+  let shadow = host ? getOverlayShadow() : null;
+  if (!host || !shadow) {
+    host = document.createElement("div");
+    host.id = OVERLAY_ID;
+    Object.assign(host.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "0",
+      pointerEvents: "none",
+    });
+    document.documentElement.insertBefore(
+      host,
+      document.documentElement.firstChild,
+    );
+    shadow = host.attachShadow({ mode: "closed" });
+    (host as HTMLElement & { __monacleShadow?: ShadowRoot }).__monacleShadow =
+      shadow;
+    rememberOverlayShadow(host, shadow);
+    const style = document.createElement("style");
+    style.textContent = `
+      :host { all: initial; }
+      .monacle-overlay-root {
+        position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      }
+      #monacle-scene {
+        position: fixed; inset: 0; pointer-events: none; z-index: 1; overflow: hidden;
+      }
+    `;
+    shadow.appendChild(style);
+    const root = document.createElement("div");
+    root.className = "monacle-overlay-root";
+    shadow.appendChild(root);
+  }
+
+  let scene = shadow.querySelector(`#${SCENE_ID}`) as HTMLElement | null;
+  if (!scene) {
+    scene = document.createElement("div");
+    scene.id = SCENE_ID;
+    scene.setAttribute("aria-hidden", "true");
+    Object.assign(scene.style, {
+      position: "fixed",
+      inset: "0",
+      pointerEvents: "none",
+      zIndex: "1",
+      overflow: "hidden",
+    });
+    shadow.appendChild(scene);
+  }
+  return scene;
+}
+
+function clearSceneRoot(): void {
+  const shadow = getOverlayShadow();
+  const scene = shadow?.querySelector(`#${SCENE_ID}`);
+  if (scene) scene.replaceChildren();
+}
+
+function stampBatch(el: Element, batchId: string | undefined): void {
+  if (batchId) el.setAttribute(BATCH_MARK, batchId);
 }
 
 function ensureRuntimeStyle(): HTMLStyleElement {
@@ -86,43 +186,94 @@ function markInserted(node: Node): void {
   }
 }
 
+function parseCreateNodes(
+  html: string,
+  batchId?: string,
+): { frag: DocumentFragment; created: Element[] } {
+  if (html.length > MAX_CREATE_HTML) {
+    throw new Error(`create html exceeds ${MAX_CREATE_HTML} bytes`);
+  }
+  const template = document.createElement("template");
+  template.innerHTML = html.trim();
+  const created: Element[] = [];
+  const frag = document.createDocumentFragment();
+  for (const node of Array.from(template.content.childNodes)) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      if (created.length >= CREATE_CHILD_CAP) break;
+      const el = node as Element;
+      markInserted(el);
+      stampBatch(el, batchId);
+      created.push(el);
+      frag.appendChild(node);
+    } else {
+      frag.appendChild(node);
+    }
+  }
+  return { frag, created };
+}
+
 function insertHtml(
   html: string,
   selector: string,
   position: "before" | "after" | "prepend" | "append" = "append",
+  batchId?: string,
 ): Element[] {
   const targets = safeQuery(selector);
   const created: Element[] = [];
   for (const target of targets) {
-    if (isProtectedElement(target) && (position === "prepend" || position === "append")) {
-      // Do not inject into protected media subtrees as children that could replace them.
-      if (target.matches("video, audio")) continue;
-    }
-    const template = document.createElement("template");
-    template.innerHTML = html.trim();
-    const nodes = Array.from(template.content.childNodes);
-    for (const node of nodes) {
-      markInserted(node);
-      if (node.nodeType === Node.ELEMENT_NODE) created.push(node as Element);
-    }
-    const frag = document.createDocumentFragment();
-    for (const node of nodes) frag.appendChild(node);
-
-    switch (position) {
-      case "before":
-        target.parentElement?.insertBefore(frag, target);
-        break;
-      case "after":
-        target.parentElement?.insertBefore(frag, target.nextSibling);
-        break;
-      case "prepend":
-        target.insertBefore(frag, target.firstChild);
-        break;
-      case "append":
-        target.appendChild(frag);
-        break;
-    }
+    isolateVoid(() => {
+      if (
+        isProtectedElement(target) &&
+        (position === "prepend" || position === "append")
+      ) {
+        if (target.matches("video, audio")) return;
+      }
+      const parsed = parseCreateNodes(html, batchId);
+      for (const el of parsed.created) created.push(el);
+      switch (position) {
+        case "before":
+          target.parentElement?.insertBefore(parsed.frag, target);
+          break;
+        case "after":
+          target.parentElement?.insertBefore(parsed.frag, target.nextSibling);
+          break;
+        case "prepend":
+          target.insertBefore(parsed.frag, target.firstChild);
+          break;
+        case "append":
+          target.appendChild(parsed.frag);
+          break;
+      }
+    });
   }
+  return created.slice(0, CREATE_CHILD_CAP);
+}
+
+/** Create Monacle-owned nodes in #monacle-scene, or page-level if selector given. */
+function createHtml(
+  html: string,
+  opts?: {
+    selector?: string;
+    position?: "before" | "after" | "prepend" | "append";
+    batchId?: string;
+  },
+): Element[] {
+  const selector = opts?.selector?.trim();
+  if (selector) {
+    return insertHtml(
+      html,
+      selector,
+      opts?.position ?? "append",
+      opts?.batchId,
+    );
+  }
+  const scene = ensureSceneRoot();
+  const created: Element[] = [];
+  isolateVoid(() => {
+    const parsed = parseCreateNodes(html, opts?.batchId);
+    for (const el of parsed.created) created.push(el);
+    scene.appendChild(parsed.frag);
+  });
   return created;
 }
 
@@ -281,9 +432,15 @@ function buildApi(): MonacleHostApi {
       return safeQuery(selector).map(wrapElementGuards);
     },
     insert(html, opts) {
-      return insertHtml(html, opts.selector, opts.position ?? "append").map(
-        wrapElementGuards,
-      );
+      return insertHtml(
+        html,
+        opts.selector,
+        opts.position ?? "append",
+        opts.batchId,
+      ).map(wrapElementGuards);
+    },
+    create(html, opts) {
+      return createHtml(html, opts).map(wrapElementGuards);
     },
     get overlay() {
       return getOverlayShadow();
@@ -299,8 +456,12 @@ function buildApi(): MonacleHostApi {
       if (!canvas) {
         canvas = document.createElement("canvas");
         canvas.setAttribute("data-monacle-canvas", "1");
-        canvas.width = Math.max(1, window.innerWidth || 1);
-        canvas.height = Math.max(1, window.innerHeight || 1);
+        const size = capCanvasSize(
+          window.innerWidth || 1,
+          window.innerHeight || 1,
+        );
+        canvas.width = size.width;
+        canvas.height = size.height;
         Object.assign(canvas.style, {
           position: "fixed",
           inset: "0",
@@ -319,7 +480,13 @@ function buildApi(): MonacleHostApi {
     raf(fn) {
       const id = requestAnimationFrame((t) => {
         rafIds = rafIds.filter((x) => x !== id);
-        fn(t);
+        try {
+          fn(t);
+        } catch (err) {
+          reportRuntimeError(
+            err instanceof Error ? err.message : String(err),
+          );
+        }
       });
       rafIds.push(id);
       return id;
@@ -327,7 +494,13 @@ function buildApi(): MonacleHostApi {
     timeout(fn, ms) {
       const id = window.setTimeout(() => {
         timeoutIds = timeoutIds.filter((x) => x !== id);
-        fn();
+        try {
+          fn();
+        } catch (err) {
+          reportRuntimeError(
+            err instanceof Error ? err.message : String(err),
+          );
+        }
       }, ms);
       timeoutIds.push(id);
       return id;
@@ -373,6 +546,7 @@ function applyLiveStyle(
 
 function stopRuntimeEngine(): void {
   stopSandboxRuntime();
+  stopThreeStage();
   for (const fn of cleanups.splice(0)) {
     try {
       fn();
@@ -385,12 +559,26 @@ function stopRuntimeEngine(): void {
   document.getElementById(RUNTIME_STYLE_ID)?.remove();
   const shadow = getOverlayShadow();
   shadow?.querySelector("canvas[data-monacle-canvas]")?.remove();
+  clearSceneRoot();
 }
 
 export function stopRuntime(): void {
   stopRuntimeEngine();
   document.querySelectorAll(`[${INSERT_MARK}]`).forEach((el) => el.remove());
+  // Scene lives in closed shadow — clearSceneRoot already emptied it; also drop
+  // any leftover batch-marked nodes inside the shadow.
+  const shadow = getOverlayShadow();
+  shadow
+    ?.querySelectorAll(`[${INSERT_MARK}]`)
+    .forEach((el) => el.remove());
   stopMediaCutoutTracking();
+}
+
+/** Full leave / RESET — destroy sandbox iframe + three inject state. */
+export function destroyRuntime(): void {
+  stopRuntime();
+  destroySandboxRuntime();
+  destroyThreeStage();
 }
 
 export function rememberRuntime(code: string): void {
@@ -411,8 +599,15 @@ export function runRuntime(code: string): void {
   if (!isRuntimeSourceAllowed(code)) {
     throw new Error("Runtime rejected: chrome/browser APIs are not allowed");
   }
+  const unsupported = unsupportedRuntimeReason(code);
+  if (unsupported) {
+    rememberRuntime(code);
+    reportRuntimeError(unsupported, true);
+    throw new Error(unsupported);
+  }
   rememberRuntime(code);
   const api = buildApi();
+  ensureSceneRoot();
   const host = document.getElementById(OVERLAY_ID) as HTMLElement | null;
   if (host) startMediaCutoutTracking(host);
 
@@ -424,19 +619,31 @@ export function runRuntime(code: string): void {
         opts.selector,
         (opts.position as "before" | "after" | "prepend" | "append") ??
           "append",
+        opts.batchId,
       ).map(serializeEl),
+    create: (html, opts) =>
+      createHtml(html, {
+        selector: opts?.selector,
+        position: opts?.position as
+          | "before"
+          | "after"
+          | "prepend"
+          | "append"
+          | undefined,
+        batchId: opts?.batchId,
+      }).map(serializeEl),
     css: (text) => api.css(text),
     style: applyLiveStyle,
+    three: buildThreeApi(),
     media: collectMedia,
     viewport: () => ({
       width: window.innerWidth,
       height: window.innerHeight,
     }),
-    canvas: () => api.canvas(),
   }).catch((err) => {
-    console.warn(
-      "[Monacle] sandbox runtime failed to start",
-      err instanceof Error ? err.message : err,
+    reportRuntimeError(
+      err instanceof Error ? err.message : String(err),
+      true,
     );
   });
 }

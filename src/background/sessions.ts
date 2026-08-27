@@ -176,3 +176,28 @@ export async function touchPageMeta(
   session.pageTitle = pageTitle;
   await saveSession(session);
 }
+
+export async function setLastRuntimeError(
+  sessionId: string,
+  error: string | undefined,
+): Promise<void> {
+  const session = await getSession(sessionId);
+  if (!session) return;
+  if (error && error.trim()) session.lastRuntimeError = error.trim();
+  else delete session.lastRuntimeError;
+  await saveSession(session);
+}
+
+export async function setCursorSessionId(
+  sessionId: string,
+  cursorSessionId: string | undefined,
+): Promise<void> {
+  const session = await getSession(sessionId);
+  if (!session) return;
+  if (cursorSessionId && cursorSessionId.trim()) {
+    session.cursorSessionId = cursorSessionId.trim();
+  } else {
+    delete session.cursorSessionId;
+  }
+  await saveSession(session);
+}

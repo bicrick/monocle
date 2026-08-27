@@ -178,17 +178,41 @@ async function checkAgentLogin() {
   console.log(`
 ┌────────────────────────────────────────────────────────────┐
 │  Dev stack ready                                           │
-│  • Companion: http://${COMPANION_HOST}:${COMPANION_PORT}                      │
+│  • Companion: http://${COMPANION_HOST}:${COMPANION_PORT}  (multi-session)     │
 │  • Vite/CRX:  http://localhost:5173 (or next free port)    │
 │  If restyles fail with auth: run \`agent login\` here.        │
-│  Debug loop:  npm run loop                                 │
+│  Sidepanel + npm run loop can share this companion.        │
 └────────────────────────────────────────────────────────────┘
 `);
+}
+
+async function ensurePageStage() {
+  const stageJs = path.join(root, "src/page/threeStage.js");
+  const stageTs = path.join(root, "src/page/threeStage.ts");
+  if (!fs.existsSync(stageTs)) return;
+  const needsBuild =
+    !fs.existsSync(stageJs) ||
+    fs.statSync(stageTs).mtimeMs > fs.statSync(stageJs).mtimeMs;
+  if (!needsBuild) return;
+  log("building page threeStage.js for CRXJS WAR…");
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(root, "scripts/build-page-stage.mjs")], {
+      cwd: root,
+      env: process.env,
+      stdio: "inherit",
+    });
+    child.on("exit", (code) =>
+      code === 0 ? resolve() : reject(new Error(`build-page-stage exited ${code}`)),
+    );
+    child.on("error", reject);
+  });
 }
 
 async function main() {
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+
+  await ensurePageStage();
 
   if (await companionUp()) {
     log(`companion already healthy on ${COMPANION_HOST}:${COMPANION_PORT} — leaving it`);

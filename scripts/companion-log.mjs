@@ -40,8 +40,18 @@ export function logPath() {
   return LOG_PATH;
 }
 
-export function writeLog(line, { echo = true, ring: useRing = true } = {}) {
-  const text = stripAnsi(line).replace(/\s+$/, "");
+function shortSession(id) {
+  const s = String(id || "");
+  if (!s) return "";
+  return s.length <= 18 ? s : s.slice(0, 18);
+}
+
+export function writeLog(
+  line,
+  { echo = true, ring: useRing = true, session = null } = {},
+) {
+  const tag = session ? `[${shortSession(session)}] ` : "";
+  const text = stripAnsi(`${tag}${line}`).replace(/\s+$/, "");
   if (!text) return;
   const stamped = `${new Date().toISOString()} ${text}`;
   if (echo) console.log(stamped);

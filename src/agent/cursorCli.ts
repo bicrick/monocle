@@ -12,13 +12,10 @@ import {
 } from "../patches/schema";
 import type { AgentProvider } from "./types";
 
-function newSessionId(): string {
-  return `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
 /** Talks to the local Monacle companion, which runs Cursor CLI on this machine. */
 export class CursorCliProvider implements AgentProvider {
-  readonly kind = "stateless" as const;
+  /** One continuous Cursor CLI chat per Monacle chat (`--resume`). */
+  readonly kind = "persistent" as const;
 
   constructor(
     private readonly settings: Settings,
@@ -26,17 +23,18 @@ export class CursorCliProvider implements AgentProvider {
   ) {}
 
   async startSession(ctx: PageContext, tabId: number): Promise<AgentSession> {
+    // Background should prefer binding to ChatSession.id; this is a fallback.
     return {
-      id: newSessionId(),
+      id: `chat_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       tabId,
-      kind: "stateless",
+      kind: "persistent",
       pageUrl: ctx.url,
       createdAt: Date.now(),
     };
   }
 
   async *send(
-    _session: AgentSession,
+    session: AgentSession,
     prompt: string,
     history: Array<{ role: "user" | "assistant"; content: string }>,
     pageContext: PageContext,
@@ -52,10 +50,15 @@ export class CursorCliProvider implements AgentProvider {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          // Companion concurrency key = Monacle chat id
+          sessionId: session.id,
+          source: "sidepanel",
           systemPrompt: this.systemPrompt,
           prompt,
           history,
           context: pageContext,
+          resumeId: session.cursorSessionId || undefined,
+          cursorSessionId: session.cursorSessionId || undefined,
           images: images?.map((img) => ({
             name: img.name,
             mimeType: img.mimeType,
@@ -77,7 +80,9 @@ export class CursorCliProvider implements AgentProvider {
         type: "progress",
         update: true,
         line: {
-          label: "Asking Cursor",
+          label: session.cursorSessionId
+            ? "Continuing chat"
+            : "Asking Cursor",
           detail: "waiting… 1s",
           ts: Date.now(),
           state: "active",
@@ -90,13 +95,15 @@ export class CursorCliProvider implements AgentProvider {
           sleep(600).then(() => "tick" as const),
         ]);
         if (raced !== "tick") break;
-        const detail = await readCliStatus(base);
+        const detail = await readCliStatus(base, session.id);
         if (detail) {
           yield {
             type: "progress",
             update: true,
             line: {
-              label: "Asking Cursor",
+              label: session.cursorSessionId
+                ? "Continuing chat"
+                : "Asking Cursor",
               detail,
               ts: Date.now(),
               state: "active",
@@ -122,13 +129,33 @@ export class CursorCliProvider implements AgentProvider {
         }
         const head = parsed?.error || body.slice(0, 400);
         const tail = parsed?.logs ? `\n\n${parsed.logs}` : "";
-        throw new Error(`Local Cursor companion ${res.status}: ${head}${tail}`);
+        const busy =
+          res.status === 429 || res.status === 409
+            ? " Another agent is using this companion — retry in a moment."
+            : "";
+        throw new Error(
+          `Local Cursor companion ${res.status}: ${head}${tail}${busy}`,
+        );
       }
 
-      const data = (await res.json()) as { text?: string; error?: string };
+      const data = (await res.json()) as {
+        text?: string;
+        error?: string;
+        cursorSessionId?: string;
+      };
       if (data.error) throw new Error(data.error);
-      const text = data.text ?? "";
 
+      if (
+        typeof data.cursorSessionId === "string" &&
+        data.cursorSessionId.trim()
+      ) {
+        yield {
+          type: "cursor_session",
+          cursorSessionId: data.cursorSessionId.trim(),
+        };
+      }
+
+      const text = data.text ?? "";
       if (text.trim()) yield { type: "text", text };
 
       const patch = extractPatchFromText(text);
@@ -155,9 +182,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function readCliStatus(base: string): Promise<string> {
+async function readCliStatus(
+  base: string,
+  sessionId?: string,
+): Promise<string> {
   try {
-    const res = await fetch(`${base}/status`);
+    const qs = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
+    const res = await fetch(`${base}/status${qs}`);
     if (!res.ok) return "";
     const data = (await res.json()) as {
       running?: boolean;
@@ -166,7 +197,6 @@ async function readCliStatus(base: string): Promise<string> {
       lines?: string[];
       raw?: string[];
     };
-    // Prefer human agent steps (thinking / tools), not raw NDJSON plumbing.
     const steps = data.lines?.length ? data.lines : data.raw ?? [];
     if (!data.running && !steps.length) return "";
     const parts: string[] = [];

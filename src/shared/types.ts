@@ -42,6 +42,7 @@ export interface PageContext {
   landmarks: LandmarkNode[];
   media: MediaInfo[];
   capturedAt: number;
+  lastRuntimeError?: string;
 }
 
 export type PatchOpType =
@@ -77,11 +78,14 @@ export interface Patch {
 }
 
 export interface AgentSession {
+  /** Monacle chat id (`chat_*`) — one agent conversation per chat. */
   id: string;
   tabId: number;
   kind: "stateless" | "persistent";
   pageUrl: string;
   createdAt: number;
+  /** Cursor CLI session UUID for `agent --resume`. */
+  cursorSessionId?: string;
 }
 
 export interface PromptImage {
@@ -104,6 +108,7 @@ export type AgentEvent =
   | { type: "code"; code: string }
   | { type: "error"; message: string }
   | { type: "progress"; line: ActivityLine; update?: boolean }
+  | { type: "cursor_session"; cursorSessionId: string }
   | { type: "done" };
 
 export type RuntimeMessage =
@@ -149,7 +154,8 @@ export type RuntimeMessage =
   | { type: "OPEN_SESSION"; tabId: number; sessionId: string }
   | { type: "NEW_SESSION"; tabId: number }
   | { type: "OPEN_OPTIONS" }
-  | { type: "RUN_SANDBOX"; code: string; context: PageContext };
+  | { type: "RUN_SANDBOX"; code: string; context: PageContext }
+  | { type: "INJECT_THREE_STAGE" };
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -172,6 +178,8 @@ export interface ChatSession {
   activity: ActivityLine[];
   /** Last sandbox/runtime failure — included on the next restyle turn. */
   lastRuntimeError?: string;
+  /** Cursor CLI chat UUID — successive prompts in this chat use --resume. */
+  cursorSessionId?: string;
 }
 
 export interface SessionSummary {

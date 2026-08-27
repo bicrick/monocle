@@ -1,5 +1,5 @@
 /**
- * Hold-test: apply an ocean-like runtime (canvas raf + kelp style writes)
+ * Hold-test: apply an ocean-like runtime (DOM create + style writes)
  * and verify the extension service worker survives ~15s.
  */
 import assert from "node:assert/strict";
@@ -59,58 +59,40 @@ async function getWorker(browser, extId) {
 }
 
 const oceanRuntime = `
-const c = monacle.canvas();
-const ctx = c.getContext('2d');
+monacle.css('.monacle-fish{position:fixed;width:28px;height:14px;border-radius:50%;pointer-events:none;z-index:1;}.monacle-bubble{position:fixed;width:6px;height:6px;border-radius:50%;border:1px solid rgba(190,230,255,0.45);pointer-events:none;z-index:1;}');
+const fish = [];
+for (let i = 0; i < 10; i++) {
+  const nodes = monacle.create('<div class="monacle-fish" style="background:hsla(' + (160 + i * 8) + ',55%,50%,0.8);"></div>');
+  fish.push({ el: nodes[0], x: Math.random(), y: 0.25 + Math.random() * 0.45, sp: 0.0015 + Math.random() * 0.002, dir: Math.random() > 0.5 ? 1 : -1, phase: Math.random() * 6.28 });
+}
+const bubbles = [];
+for (let i = 0; i < 14; i++) {
+  const nodes = monacle.create('<div class="monacle-bubble"></div>');
+  bubbles.push({ el: nodes[0], x: Math.random(), y: Math.random(), sp: 0.002 + Math.random() * 0.004 });
+}
 let t = 0;
 let rafId;
-const fish = Array.from({ length: 14 }, (_, i) => ({
-  x: Math.random() * (innerWidth || 800),
-  y: 80 + Math.random() * ((innerHeight || 600) * 0.65),
-  s: 0.55 + Math.random() * 0.9,
-  sp: 0.6 + Math.random() * 1.4,
-  dir: Math.random() > 0.5 ? 1 : -1,
-  hue: 18 + (i % 5) * 12,
-  phase: Math.random() * Math.PI * 2,
-  bob: 8 + Math.random() * 14
-}));
-const bubbles = Array.from({ length: 28 }, () => ({
-  x: Math.random() * (innerWidth || 800),
-  y: Math.random() * (innerHeight || 600),
-  r: 1.5 + Math.random() * 3.5,
-  sp: 0.3 + Math.random() * 0.8,
-  drift: (Math.random() - 0.5) * 0.4
-}));
-function sizeCanvas() {
-  const w = innerWidth | 0;
-  const h = innerHeight | 0;
-  if (w > 0 && c.width !== w) c.width = w;
-  if (h > 0 && c.height !== h) c.height = h;
-}
 function frame() {
   t += 0.022;
-  sizeCanvas();
-  const w = c.width;
-  const h = c.height;
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = 'rgba(180,230,255,0.08)';
-  ctx.fillRect(0, 0, w, 40);
-  for (const b of bubbles) {
-    b.y -= b.sp;
-    b.x += b.drift;
-    if (b.y < -10) { b.y = h + 10; b.x = Math.random() * w; }
-    ctx.strokeStyle = 'rgba(190,230,255,0.35)';
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
-    ctx.stroke();
-  }
+  const w = innerWidth || 800;
+  const h = innerHeight || 600;
   for (const f of fish) {
     f.x += f.sp * f.dir;
-    if (f.dir > 0 && f.x > w + 60) f.x = -60;
-    if (f.dir < 0 && f.x < -60) f.x = w + 60;
-    ctx.fillStyle = 'hsla(' + f.hue + ',55%,58%,0.88)';
-    ctx.beginPath();
-    ctx.ellipse(f.x, f.y + Math.sin(t + f.phase) * f.bob, 22 * f.s, 10 * f.s, 0, 0, Math.PI * 2);
-    ctx.fill();
+    if (f.x > 1.05) { f.x = -0.05; f.dir = 1; }
+    if (f.x < -0.05) { f.x = 1.05; f.dir = -1; }
+    if (f.el && f.el.style) {
+      f.el.style.left = (f.x * w) + 'px';
+      f.el.style.top = (f.y * h + Math.sin(t * 1.2 + f.phase) * 8) + 'px';
+      f.el.style.transform = 'scaleX(' + f.dir + ')';
+    }
+  }
+  for (const b of bubbles) {
+    b.y -= b.sp;
+    if (b.y < -0.05) { b.y = 1.05; b.x = Math.random(); }
+    if (b.el && b.el.style) {
+      b.el.style.left = (b.x * w) + 'px';
+      b.el.style.top = (b.y * h) + 'px';
+    }
   }
   const kelp = monacle.query('[data-monacle-insert="kelp"]');
   kelp.forEach((el, i) => {

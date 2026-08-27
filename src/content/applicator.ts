@@ -1,8 +1,10 @@
 import type { Patch, PatchOp } from "../shared/types";
 import { isProtectedElement } from "../patches/schema";
+import { isolateVoid } from "./isolate";
 import {
   INSERT_MARK,
   clearRuntimeMemory,
+  destroyRuntime,
   getLastRuntime,
   rememberOverlayShadow,
   rememberRuntime,
@@ -10,6 +12,9 @@ import {
   startMediaCutoutTracking,
   stopRuntime,
 } from "./runtime";
+
+/** Generic resource cap — oversized inserts can OOM the tab, not just this scene. */
+const MAX_INSERT_HTML = 200_000;
 
 const STYLE_ID = "monacle-css";
 const OVERLAY_ID = "monacle-overlay";
@@ -90,8 +95,16 @@ function applyOverlay(html: string): void {
         font-family: system-ui, -apple-system, sans-serif;
         z-index: 0;
       }
+      #monacle-scene {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 1;
+        overflow: hidden;
+      }
     </style>
     <div class="monacle-overlay-root">${html}</div>
+    <div id="monacle-scene" aria-hidden="true"></div>
   `;
   raiseProtectedMedia();
   startMediaCutoutTracking(host);
@@ -107,37 +120,45 @@ function safeQuery(selector: string): Element[] {
 
 function applyInsert(op: PatchOp): void {
   if (!op.html) return;
+  if (op.html.length > MAX_INSERT_HTML) {
+    throw new Error(`insert html exceeds ${MAX_INSERT_HTML} bytes`);
+  }
   const position = op.position || "append";
   const els = safeQuery(op.selector);
   for (const el of els) {
-    if (el.matches("video, audio") && (position === "prepend" || position === "append")) {
-      continue;
-    }
-    const template = document.createElement("template");
-    template.innerHTML = op.html.trim();
-    const frag = document.createDocumentFragment();
-    for (const node of Array.from(template.content.childNodes)) {
-      if (node.nodeType === Node.ELEMENT_NODE) {
-        const el = node as Element;
-        if (!el.hasAttribute(INSERT_MARK)) {
-          el.setAttribute(INSERT_MARK, "1");
-        }
+    const failed = isolateVoid(() => {
+      if (el.matches("video, audio") && (position === "prepend" || position === "append")) {
+        return;
       }
-      frag.appendChild(node);
-    }
-    switch (position) {
-      case "before":
-        el.parentElement?.insertBefore(frag, el);
-        break;
-      case "after":
-        el.parentElement?.insertBefore(frag, el.nextSibling);
-        break;
-      case "prepend":
-        el.insertBefore(frag, el.firstChild);
-        break;
-      case "append":
-        el.appendChild(frag);
-        break;
+      const template = document.createElement("template");
+      template.innerHTML = op.html!.trim();
+      const frag = document.createDocumentFragment();
+      for (const node of Array.from(template.content.childNodes)) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          const nodeEl = node as Element;
+          if (!nodeEl.hasAttribute(INSERT_MARK)) {
+            nodeEl.setAttribute(INSERT_MARK, "1");
+          }
+        }
+        frag.appendChild(node);
+      }
+      switch (position) {
+        case "before":
+          el.parentElement?.insertBefore(frag, el);
+          break;
+        case "after":
+          el.parentElement?.insertBefore(frag, el.nextSibling);
+          break;
+        case "prepend":
+          el.insertBefore(frag, el.firstChild);
+          break;
+        case "append":
+          el.appendChild(frag);
+          break;
+      }
+    });
+    if (failed) {
+      throw new Error(failed);
     }
   }
 }
@@ -215,34 +236,84 @@ function applyOp(op: PatchOp): void {
   }
 }
 
-export function applyPatch(patch: Patch): void {
+export interface ApplyPatchResult {
+  ok: boolean;
+  error?: string;
+  opErrors?: string[];
+  runtimeStarted?: boolean;
+}
+
+function opError(op: PatchOp, err: unknown): string {
+  const detail = err instanceof Error ? err.message : String(err);
+  return `${op.type} ${op.selector}: ${detail}`;
+}
+
+function applyOpSafe(op: PatchOp): string | null {
+  const failed = isolateVoid(() => applyOp(op));
+  if (!failed) return null;
+  console.warn("[Monacle] op failed", op.type, op.selector, failed);
+  return opError(op, failed);
+}
+
+export function applyPatch(patch: Patch): ApplyPatchResult {
   // Tear down prior runtime before mutating so cleanup sees prior inserts.
-  stopRuntime();
+  isolateVoid(() => stopRuntime());
+  const opErrors: string[] = [];
 
   if (patch.css) {
-    ensureStyle().textContent = patch.css;
+    const failed = isolateVoid(() => {
+      ensureStyle().textContent = patch.css!;
+    });
+    if (failed) opErrors.push(`css: ${failed}`);
   }
+
   if (typeof patch.overlayHtml === "string") {
-    applyOverlay(patch.overlayHtml);
+    const failed = isolateVoid(() => applyOverlay(patch.overlayHtml!));
+    if (failed) {
+      opErrors.push(`overlay: ${failed}`);
+      isolateVoid(() => {
+        const { host } = getOrCreateOverlayHost();
+        raiseProtectedMedia();
+        startMediaCutoutTracking(host);
+      });
+    }
   } else if (patch.runtime) {
-    // Ensure overlay host exists for canvas/scene even without static HTML.
-    const { host } = getOrCreateOverlayHost();
-    raiseProtectedMedia();
-    startMediaCutoutTracking(host);
+    // Runtime follow-up without overlayHtml: clear prior atmosphere so scenes
+    // do not stack (moon overlay under ocean runtime, etc.).
+    const failed = isolateVoid(() => applyOverlay(""));
+    if (failed) opErrors.push(`overlay: ${failed}`);
   }
+
   if (patch.ops) {
-    for (const op of patch.ops) applyOp(op);
+    for (const op of patch.ops) {
+      const failed = applyOpSafe(op);
+      if (failed) opErrors.push(failed);
+    }
   }
+
+  let runtimeStarted = false;
   if (typeof patch.runtime === "string" && patch.runtime.trim()) {
-    runRuntime(patch.runtime);
+    const failed = isolateVoid(() => {
+      runRuntime(patch.runtime!);
+    });
+    if (failed) opErrors.push(`runtime: ${failed}`);
+    else runtimeStarted = true;
   } else {
-    clearRuntimeMemory();
+    isolateVoid(() => clearRuntimeMemory());
   }
-  document.documentElement.setAttribute("data-monacle", "on");
+  isolateVoid(() => {
+    document.documentElement.setAttribute("data-monacle", "on");
+  });
+  return {
+    ok: true,
+    error: opErrors[0],
+    opErrors: opErrors.length ? opErrors : undefined,
+    runtimeStarted,
+  };
 }
 
 export function resetPatch(): void {
-  stopRuntime();
+  destroyRuntime();
   clearRuntimeMemory();
   lastCss = "";
   lastOverlay = "";
@@ -252,6 +323,8 @@ export function resetPatch(): void {
   document.getElementById(STYLE_ID)?.remove();
   document.getElementById(OVERLAY_ID)?.remove();
   document.querySelectorAll(`[${INSERT_MARK}]`).forEach((el) => el.remove());
+  document.getElementById("monacle-three-root")?.remove();
+  document.getElementById("monacle-runtime-frame")?.remove();
 
   document.querySelectorAll(`[${MARK}]`).forEach((el) => {
     const kind = el.getAttribute(MARK);
@@ -316,8 +389,17 @@ export function reassertPatch(): void {
     raiseProtectedMedia();
     startMediaCutoutTracking(host);
   }
-  for (const op of lastOps) applyOp(op);
-  if (lastRuntimeCode) runRuntime(lastRuntimeCode);
+  for (const op of lastOps) applyOpSafe(op);
+  if (lastRuntimeCode) {
+    try {
+      runRuntime(lastRuntimeCode);
+    } catch (err) {
+      console.warn(
+        "[Monacle] reassert runtime failed",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
   document.documentElement.setAttribute("data-monacle", "on");
 }
 

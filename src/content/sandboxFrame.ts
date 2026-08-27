@@ -1,8 +1,10 @@
 /**
  * Hidden Chrome sandbox frame. Untrusted model JS evals there only.
- * The content script owns query / insert / canvas / rAF / media.
+ * The content script owns query / insert / create / rAF / media.
+ * Canvas is NOT transferred — motion uses host DOM nodes + style.
  */
 
+import { reportRuntimeError } from "./runtimeErrors";
 import {
   FRAME_ID,
   HOST_SOURCE,
@@ -22,12 +24,12 @@ let handlers: SandboxHostHandlers | null = null;
 let pumpId = 0;
 let listening = false;
 let queries: Record<string, unknown[]> = {};
-let displayCanvas: HTMLCanvasElement | null = null;
 let lastHostStateAt = 0;
 let lastHostStateKey = "";
 /** Bumped on every start/stop so in-flight starts can bail out. */
 let startGeneration = 0;
 let startChain: Promise<void> = Promise.resolve();
+let deadReported = false;
 
 function sandboxUrl(): string {
   return chrome.runtime.getURL("src/sandbox/sandbox.html");
@@ -37,14 +39,25 @@ function frameEl(): HTMLIFrameElement | null {
   return document.getElementById(FRAME_ID) as HTMLIFrameElement | null;
 }
 
-function postToFrame(
-  payload: Record<string, unknown>,
-  transfer: Transferable[] = [],
-): void {
+function noteDeadFrame(reason: string): void {
+  if (deadReported || !token) return;
+  deadReported = true;
+  stopPump();
+  reportRuntimeError(reason, true);
+}
+
+function postToFrame(payload: Record<string, unknown>): void {
   const frame = frameEl();
   const win = frame?.contentWindow;
-  if (!win) return;
-  win.postMessage({ source: HOST_SOURCE, token, ...payload }, "*", transfer);
+  if (!win) {
+    noteDeadFrame("Sandbox frame disappeared");
+    return;
+  }
+  try {
+    win.postMessage({ source: HOST_SOURCE, token, ...payload }, "*");
+  } catch {
+    noteDeadFrame("Sandbox frame rejected messages");
+  }
 }
 
 function hostStatePayload(): Record<string, unknown> {
@@ -101,6 +114,18 @@ function stopPump(): void {
   }
 }
 
+function rememberNodes(
+  kind: string,
+  selector: string,
+  nodes: unknown[],
+): void {
+  if (kind !== "query" && kind !== "create" && kind !== "insert") return;
+  const prev = JSON.stringify(queries[selector] ?? null);
+  const next = JSON.stringify(nodes);
+  queries[selector] = nodes;
+  if (prev !== next) pumpState(true);
+}
+
 function onMessage(event: MessageEvent): void {
   const frame = frameEl();
   if (!frame || event.source !== frame.contentWindow) return;
@@ -112,23 +137,29 @@ function onMessage(event: MessageEvent): void {
     const args = Array.isArray(data.args) ? data.args : [];
     try {
       const result = dispatchHostCall(String(data.method ?? ""), args, handlers);
-      if (result.kind === "query") {
-        const prev = JSON.stringify(queries[result.selector] ?? null);
-        const next = JSON.stringify(result.nodes);
-        queries[result.selector] = result.nodes;
-        if (prev !== next) pumpState(true);
+      if (
+        result.kind === "query" ||
+        result.kind === "create" ||
+        result.kind === "insert"
+      ) {
+        rememberNodes(result.kind, result.selector, result.nodes);
       }
     } catch (err) {
-      console.warn(
-        "[Monacle] sandbox host call failed",
-        err instanceof Error ? err.message : err,
+      reportRuntimeError(
+        err instanceof Error ? err.message : String(err),
+        false,
       );
     }
     return;
   }
 
   if (data.type === "monacle-runtime-error") {
-    console.warn("[Monacle] sandbox runtime:", data.message);
+    const message =
+      typeof data.message === "string" && data.message.trim()
+        ? data.message
+        : "Scene runtime failed";
+    reportRuntimeError(message, Boolean(data.fatal));
+    if (data.fatal) stopPump();
   }
 }
 
@@ -182,18 +213,14 @@ function waitReady(frame: HTMLIFrameElement, session: string): Promise<void> {
   });
 }
 
-function releaseDisplayCanvas(): void {
-  displayCanvas?.remove();
-  displayCanvas = null;
-}
-
-/** Tear down frame/canvas/pump without bumping startGeneration. */
-function teardownSandbox(): void {
+/** Stop pump + runtime without destroying the iframe (avoids ANGLE/GPU process thrash). */
+function stopSandboxSession(): void {
   stopPump();
   handlers = null;
   queries = {};
   lastHostStateKey = "";
   lastHostStateAt = 0;
+  deadReported = false;
   const frame = frameEl();
   if (frame?.contentWindow && token) {
     try {
@@ -205,45 +232,38 @@ function teardownSandbox(): void {
       // frame gone
     }
   }
-  frame?.remove();
-  releaseDisplayCanvas();
   token = "";
+}
+
+/** Full teardown including iframe removal (reset / leave page). */
+function teardownSandbox(): void {
+  stopSandboxSession();
+  frameEl()?.remove();
+}
+
+function frameIsUsable(): boolean {
+  const frame = frameEl();
+  // Sandboxed extension pages use an opaque origin — do not touch .location.
+  // contentWindow is null when the renderer has died / frame is detached.
+  if (!frame?.isConnected || !frame.contentWindow) return false;
+  try {
+    frame.contentWindow.postMessage({ source: HOST_SOURCE, type: "monacle-ping" }, "*");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function stopSandboxRuntime(): void {
   startGeneration += 1;
-  teardownSandbox();
+  // Keep the iframe across restyles — destroy/recreate thrash crashes Chrome.
+  stopSandboxSession();
 }
 
-function transferCanvas(canvas: HTMLCanvasElement): OffscreenCanvas {
-  try {
-    return canvas.transferControlToOffscreen();
-  } catch (err) {
-    const name = err instanceof DOMException ? err.name : "";
-    const message = err instanceof Error ? err.message : String(err);
-    if (
-      name !== "InvalidStateError" &&
-      !/already transferred|detached/i.test(message)
-    ) {
-      throw err;
-    }
-    // Already transferred — replace with a fresh canvas and retry once.
-    const fresh = document.createElement("canvas");
-    fresh.setAttribute("data-monacle-canvas", "1");
-    fresh.width = Math.max(1, canvas.width || window.innerWidth || 1);
-    fresh.height = Math.max(1, canvas.height || window.innerHeight || 1);
-    Object.assign(fresh.style, {
-      position: "fixed",
-      inset: "0",
-      width: "100%",
-      height: "100%",
-      pointerEvents: "none",
-      zIndex: "0",
-    });
-    canvas.replaceWith(fresh);
-    displayCanvas = fresh;
-    return fresh.transferControlToOffscreen();
-  }
+/** Full leave / RESET — remove the sandboxed iframe. */
+export function destroySandboxRuntime(): void {
+  startGeneration += 1;
+  teardownSandbox();
 }
 
 async function startSandboxRuntimeInner(
@@ -253,7 +273,15 @@ async function startSandboxRuntimeInner(
 ): Promise<void> {
   if (generation !== startGeneration) return;
 
-  teardownSandbox();
+  // Prefer reusing the sandboxed iframe. Destroying/recreating it on every
+  // restyle spins up a new Chrome Helper (Renderer) + ANGLE context and has
+  // been crashing the extension (Crashpad dumps at each "Restyle ready").
+  const reusable = frameIsUsable();
+  if (reusable) {
+    stopSandboxSession();
+  } else {
+    teardownSandbox();
+  }
   if (generation !== startGeneration) return;
 
   if (!document.getElementById(OVERLAY_ID)) {
@@ -265,40 +293,37 @@ async function startSandboxRuntimeInner(
   handlers = next;
   queries = {};
 
-  const canvas = next.canvas();
-  displayCanvas = canvas;
-  // Do not touch canvas.width/height after this transfer — the placeholder is
-  // size-locked. The sandbox only commits OffscreenCanvas size on real changes.
-  const offscreen = transferCanvas(canvas);
-
   if (generation !== startGeneration) return;
 
-  const frame = createFrame();
-  const session = token;
-  const ready = waitReady(frame, session);
-  frame.src = sandboxUrl();
-  await ready;
+  let frame = frameEl();
+  if (!frame || !reusable) {
+    frame?.remove();
+    frame = createFrame();
+    frame.addEventListener("error", () => {
+      noteDeadFrame("Sandbox frame failed to load");
+    });
+    const session = token;
+    const ready = waitReady(frame, session);
+    frame.src = sandboxUrl();
+    await ready;
 
-  if (generation !== startGeneration || token !== session) {
-    frame.remove();
-    return;
+    if (generation !== startGeneration || token !== session) {
+      frame.remove();
+      return;
+    }
   }
 
   startPump();
-  postToFrame(
-    {
-      type: "monacle-runtime-start",
-      code,
-      canvas: offscreen,
-      ...hostStatePayload(),
-    },
-    [offscreen],
-  );
+  postToFrame({
+    type: "monacle-runtime-start",
+    code,
+    ...hostStatePayload(),
+  });
 }
 
 /**
- * Serialize starts so we never transfer two OffscreenCanvases concurrently.
- * A newer start or stop bumps startGeneration and cancels in-flight work.
+ * Serialize starts so a newer start or stop cancels in-flight work.
+ * No OffscreenCanvas transfer — DOM motion only. Reuses the sandbox iframe.
  */
 export function startSandboxRuntime(
   code: string,

@@ -1,4 +1,5 @@
 import type { ActivityLine } from "../shared/types";
+import { renderActivityDetail } from "./activityDetailView";
 
 function formatDuration(ms: number): string {
   const sec = Math.max(1, Math.round(ms / 1000));
@@ -48,6 +49,18 @@ export function createActivityBlock(): {
     }
   }
 
+  function isPinnedToBottom(el: HTMLElement, slack = 16): boolean {
+    return el.scrollTop + el.clientHeight >= el.scrollHeight - slack;
+  }
+
+  function pinLogIfNeeded(detail: HTMLElement, stick: boolean): void {
+    if (!stick) return;
+    detail.scrollTop = detail.scrollHeight;
+    requestAnimationFrame(() => {
+      detail.scrollTop = detail.scrollHeight;
+    });
+  }
+
   function render(): void {
     const title = summary.querySelector(".activity-title");
     const last = lines[lines.length - 1];
@@ -69,36 +82,62 @@ export function createActivityBlock(): {
     root.classList.toggle("is-error", last?.state === "error" && !busy);
     if (busy || last?.state === "error") root.open = true;
 
-    const prevLog = list.querySelector(
-      ".activity-item-log",
-    ) as HTMLElement | null;
-    const stick =
-      !prevLog ||
-      prevLog.scrollTop + prevLog.clientHeight >= prevLog.scrollHeight - 16;
+    // Reuse existing items so .activity-item-log keeps its scroll container
+    // (full replaceChildren reset scrollTop on every stream tick).
+    while (list.children.length > lines.length) {
+      list.lastElementChild?.remove();
+    }
 
-    list.replaceChildren();
-    for (const line of lines) {
-      const item = document.createElement("li");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      let item = list.children[i] as HTMLLIElement | undefined;
+      if (!item) {
+        item = document.createElement("li");
+        list.append(item);
+      }
       item.className = `activity-item is-${line.state}`;
-      const label = document.createElement("span");
-      label.className = "activity-item-label";
+
+      let label = item.querySelector(":scope > .activity-item-label") as
+        | HTMLElement
+        | null;
+      if (!label) {
+        label = document.createElement("span");
+        label.className = "activity-item-label";
+        item.prepend(label);
+      }
       label.textContent = line.label;
-      item.append(label);
-      if (line.detail) {
-        const detail = document.createElement("pre");
-        const isCli = line.label === "Asking Cursor";
+
+      const existingDetail = item.querySelector(
+        ":scope > .activity-item-detail",
+      ) as HTMLElement | null;
+
+      if (!line.detail) {
+        existingDetail?.remove();
+        continue;
+      }
+
+      const isCli = line.label === "Asking Cursor";
+      const wantTag = isCli ? "DIV" : "PRE";
+      let detail = existingDetail;
+      const canReuse =
+        !!detail &&
+        detail.tagName === wantTag &&
+        detail.classList.contains("activity-item-detail") &&
+        detail.classList.contains("activity-item-log") === isCli;
+
+      if (!canReuse) {
+        detail?.remove();
+        detail = document.createElement(isCli ? "div" : "pre");
         detail.className = isCli
           ? "activity-item-detail activity-item-log"
           : "activity-item-detail";
-        detail.textContent = line.detail;
         item.append(detail);
-        if (isCli && stick) {
-          requestAnimationFrame(() => {
-            detail.scrollTop = detail.scrollHeight;
-          });
-        }
       }
-      list.append(item);
+
+      const stick = !canReuse || isPinnedToBottom(detail!);
+      if (isCli) renderActivityDetail(detail!, line.detail);
+      else detail!.textContent = line.detail;
+      pinLogIfNeeded(detail!, stick);
     }
   }
 

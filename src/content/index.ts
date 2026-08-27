@@ -1,4 +1,5 @@
 import type { RuntimeMessage } from "../shared/types";
+import { isolate } from "./isolate";
 import { captureSnapshot } from "./snapshot";
 import {
   applyPatch,
@@ -46,36 +47,51 @@ chrome.runtime.onMessage.addListener(
       message.type === "SAVE_SETTINGS" ||
       message.type === "OPEN_OPTIONS" ||
       message.type === "AGENT_EVENT" ||
+      message.type === "RUNTIME_ERROR" ||
       message.type === "RUN_SANDBOX" ||
       message.type === "LIST_SESSIONS" ||
       message.type === "OPEN_SESSION" ||
       message.type === "NEW_SESSION" ||
+      message.type === "INJECT_THREE_STAGE" ||
       (message.type === "RESET" && "tabId" in message && message.tabId != null)
     ) {
       return false;
     }
 
     if (message.type === "GET_SNAPSHOT") {
-      sendResponse({ type: "SNAPSHOT", context: captureSnapshot() });
+      const snap = isolate(captureSnapshot, {
+        url: location.href,
+        title: document.title,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        landmarks: [],
+        media: [],
+        capturedAt: Date.now(),
+      });
+      sendResponse({ type: "SNAPSHOT", context: snap.value });
       return true;
     }
     if (message.type === "APPLY_PATCH") {
-      try {
+      const applied = isolate(() => {
         rememberPatch(message.patch);
-        applyPatch(message.patch);
-        sendResponse({ type: "PATCH_APPLIED", ok: true });
-      } catch (err) {
-        sendResponse({
-          type: "PATCH_APPLIED",
-          ok: false,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        return applyPatch(message.patch);
+      }, {
+        ok: true,
+        error: "apply failed",
+        runtimeStarted: false,
+      });
+      const result = applied.value;
+      if (applied.error) {
+        result.error = result.error || applied.error;
+        result.opErrors = [...(result.opErrors ?? []), applied.error];
       }
+      sendResponse({ type: "PATCH_APPLIED", ...result });
       return true;
     }
     if (message.type === "RESET") {
-      resetPatch();
-      clearMemory();
+      isolate(() => {
+        resetPatch();
+        clearMemory();
+      }, undefined);
       sendResponse({ type: "RESET_DONE" });
       return true;
     }

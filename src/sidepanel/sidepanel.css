@@ -487,11 +487,62 @@ button.send {
 }
 
 .activity-item-log {
-  max-height: 220px;
+  max-height: 320px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10px;
   line-height: 1.4;
   opacity: 0.85;
+}
+
+.activity-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-family: var(--font);
+}
+
+.activity-detail-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-detail-step {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.activity-detail-block {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--well);
+  min-width: 0;
+}
+
+.activity-detail-label {
+  padding: 5px 8px 0;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.activity-detail-code {
+  margin: 0;
+  padding: 4px 8px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 148px;
+  overflow: auto;
+  color: var(--text);
+  opacity: 0.9;
 }
 
 #log-host {

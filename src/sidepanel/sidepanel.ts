@@ -32,6 +32,21 @@ const sandboxFrame = document.getElementById(
   "sandbox-frame",
 ) as HTMLIFrameElement;
 
+const TRANSCRIPT_SCROLL_SLACK = 48;
+let transcriptStickBottom = true;
+
+transcript.addEventListener("scroll", () => {
+  transcriptStickBottom =
+    transcript.scrollTop + transcript.clientHeight >=
+    transcript.scrollHeight - TRANSCRIPT_SCROLL_SLACK;
+});
+
+function scrollTranscriptToBottom(force = false): void {
+  if (!force && !transcriptStickBottom) return;
+  transcript.scrollTop = transcript.scrollHeight;
+  transcriptStickBottom = true;
+}
+
 let tabId: number | null = null;
 let sessionId: string | null = null;
 let busy = false;
@@ -61,7 +76,7 @@ function appendMessage(msg: ChatMessage): HTMLElement {
   el.className = `msg ${msg.role}`;
   el.textContent = msg.content;
   transcript.appendChild(el);
-  transcript.scrollTop = transcript.scrollHeight;
+  scrollTranscriptToBottom(true);
   return el;
 }
 
@@ -70,6 +85,7 @@ function renderMessages(messages: ChatMessage[]): void {
   draftAssistant = null;
   activity.clear();
   for (const m of messages) appendMessage(m);
+  scrollTranscriptToBottom(true);
 }
 
 function appendAssistantDelta(text: string): void {
@@ -80,12 +96,12 @@ function appendAssistantDelta(text: string): void {
     transcript.appendChild(draftAssistant);
   }
   draftAssistant.textContent = (draftAssistant.textContent || "") + text;
-  transcript.scrollTop = transcript.scrollHeight;
+  scrollTranscriptToBottom();
 }
 
 function ensureThoughtUnderChat(): void {
   activity.mountInto(transcript);
-  transcript.scrollTop = transcript.scrollHeight;
+  scrollTranscriptToBottom();
 }
 
 function composerMaxPx(): number {

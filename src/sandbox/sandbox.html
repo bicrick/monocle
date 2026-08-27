@@ -27,69 +27,76 @@
         var pendingRafs = {};
         var rafSeq = 1;
         var runtimeTimeouts = [];
-        var offscreenCanvas = null;
-        var wrappedCanvas = null;
         var runtimeToken = "";
         var pendingStyles = [];
         var styleFlushScheduled = false;
+        var errorStreak = 0;
+        var overrunStreak = 0;
+        var skipNextFrame = false;
+        var runtimeTripped = false;
+        var createSeq = 1;
+        var RAF_ERROR_LIMIT = 3;
+        var FRAME_BUDGET_MS = 16;
+        var CREATE_CHILD_CAP = 80;
 
-        // Mirror src/sandbox/safeCanvasDim.ts — sandbox.html is copied raw.
-        function nextCanvasDim(current, requested) {
-          var n = typeof requested === "number" ? requested : Number(requested);
-          if (!isFinite(n) || n < 1) return null;
-          var rounded = Math.round(n);
-          if (rounded === current) return null;
-          return rounded;
+        function backingWidth() {
+          return (hostState.viewport && hostState.viewport.width) || 0;
         }
 
-        function commitCanvasDim(canvas, prop, requested) {
-          var next = nextCanvasDim(canvas[prop], requested);
-          if (next == null) return false;
-          canvas[prop] = next;
-          return true;
-        }
-
-        function wrapOffscreen(raw) {
-          return new Proxy(raw, {
-            get: function (target, prop, receiver) {
-              var val = Reflect.get(target, prop, receiver);
-              if (typeof val === "function") return val.bind(target);
-              return val;
-            },
-            set: function (target, prop, value) {
-              if (prop === "width" || prop === "height") {
-                commitCanvasDim(target, prop, value);
-                return true;
-              }
-              target[prop] = value;
-              return true;
-            },
-          });
-        }
-
-        function syncOffscreenToViewport() {
-          if (!offscreenCanvas || !hostState.viewport) return;
-          commitCanvasDim(offscreenCanvas, "width", hostState.viewport.width);
-          commitCanvasDim(offscreenCanvas, "height", hostState.viewport.height);
+        function backingHeight() {
+          return (hostState.viewport && hostState.viewport.height) || 0;
         }
 
         try {
           Object.defineProperty(window, "innerWidth", {
             configurable: true,
             get: function () {
-              return (hostState.viewport && hostState.viewport.width) || 0;
+              return backingWidth();
             },
           });
           Object.defineProperty(window, "innerHeight", {
             configurable: true,
             get: function () {
-              return (hostState.viewport && hostState.viewport.height) || 0;
+              return backingHeight();
             },
           });
         } catch (e) {}
 
         window.cancelAnimationFrame = function (id) {
           delete pendingRafs[id];
+        };
+
+        window.requestAnimationFrame = function (fn) {
+          var id = rafSeq++;
+          pendingRafs[id] = fn;
+          return id;
+        };
+
+        var nativeSetTimeout = window.setTimeout.bind(window);
+        var nativeSetInterval = window.setInterval.bind(window);
+        window.setTimeout = function (fn, ms) {
+          if (typeof fn !== "function") return nativeSetTimeout(fn, ms);
+          return nativeSetTimeout(function () {
+            if (runtimeTripped) return;
+            try {
+              fn();
+              errorStreak = 0;
+            } catch (e) {
+              noteCallbackError(e);
+            }
+          }, ms);
+        };
+        window.setInterval = function (fn, ms) {
+          if (typeof fn !== "function") return nativeSetInterval(fn, ms);
+          return nativeSetInterval(function () {
+            if (runtimeTripped) return;
+            try {
+              fn();
+              errorStreak = 0;
+            } catch (e) {
+              noteCallbackError(e);
+            }
+          }, ms);
         };
 
         function postParent(payload) {
@@ -116,26 +123,67 @@
           }
           runtimeCleanups = [];
           pendingRafs = {};
-          wrappedCanvas = null;
           pendingStyles = [];
           styleFlushScheduled = false;
+          errorStreak = 0;
+          overrunStreak = 0;
+          skipNextFrame = false;
           for (var k = 0; k < runtimeTimeouts.length; k++) {
             clearTimeout(runtimeTimeouts[k]);
           }
           runtimeTimeouts = [];
         }
 
+        function tripRuntime(message) {
+          if (runtimeTripped) return;
+          runtimeTripped = true;
+          stopRuntimeLocal();
+          postParent({
+            type: "monacle-runtime-error",
+            fatal: true,
+            message: message || "Scene runtime stopped",
+          });
+        }
+
+        function noteCallbackError(err) {
+          var message = err && err.message ? err.message : String(err);
+          errorStreak += 1;
+          var fatal = errorStreak >= RAF_ERROR_LIMIT;
+          postParent({
+            type: "monacle-runtime-error",
+            fatal: fatal,
+            message: message,
+          });
+          if (fatal) {
+            runtimeTripped = true;
+            stopRuntimeLocal();
+          }
+        }
+
+        window.addEventListener("error", function (ev) {
+          noteCallbackError(ev.error || ev.message || "uncaught error");
+          ev.preventDefault();
+        });
+        window.addEventListener("unhandledrejection", function (ev) {
+          noteCallbackError(ev.reason || "unhandled rejection");
+          ev.preventDefault();
+        });
+
         function applyHostState(data) {
           if (data.media) hostState.media = data.media;
-          if (data.viewport) {
-            hostState.viewport = data.viewport;
-            syncOffscreenToViewport();
-          }
+          if (data.viewport) hostState.viewport = data.viewport;
           if (data.queries) hostState.queries = data.queries;
         }
 
         function flushRafs(time) {
+          if (runtimeTripped) return;
+          if (skipNextFrame) {
+            skipNextFrame = false;
+            return;
+          }
+          var start = performance.now();
           var ids = Object.keys(pendingRafs);
+          var failed = false;
           for (var i = 0; i < ids.length; i++) {
             var id = ids[i];
             var fn = pendingRafs[id];
@@ -144,16 +192,25 @@
               try {
                 fn(time);
               } catch (e) {
-                postParent({
-                  type: "monacle-runtime-error",
-                  message: e && e.message ? e.message : String(e),
-                });
+                failed = true;
+                noteCallbackError(e);
+                if (runtimeTripped) return;
               }
             }
           }
+          if (!failed) errorStreak = 0;
+          var elapsed = performance.now() - start;
+          if (elapsed > FRAME_BUDGET_MS) {
+            skipNextFrame = true;
+            overrunStreak += 1;
+            if (elapsed > FRAME_BUDGET_MS * 4 && overrunStreak >= RAF_ERROR_LIMIT) {
+              tripRuntime("Runtime frame budget exceeded");
+            }
+          } else {
+            overrunStreak = 0;
+          }
         }
 
-        // Batch style writes so kelp sway is cheap.
         function postStyle(selector, index, props) {
           var flat = {};
           if (props && typeof props === "object") {
@@ -248,7 +305,81 @@
           });
         }
 
+        function countTopLevelElements(html) {
+          try {
+            var t = document.createElement("template");
+            t.innerHTML = String(html || "").trim();
+            var n = 0;
+            for (var i = 0; i < t.content.childNodes.length; i++) {
+              if (t.content.childNodes[i].nodeType === 1) {
+                n += 1;
+                if (n >= CREATE_CHILD_CAP) break;
+              }
+            }
+            return n;
+          } catch (e) {
+            return 0;
+          }
+        }
+
+        function nextBatchId() {
+          return (
+            "b" +
+            Date.now().toString(36) +
+            "_" +
+            (createSeq++).toString(36)
+          );
+        }
+
+        function batchSelector(batchId) {
+          return '[data-monacle-batch="' + batchId + '"]';
+        }
+
+        function placeholderNodes(selector, count) {
+          var out = [];
+          for (var i = 0; i < count; i++) {
+            out.push(
+              wrapQueryNode(selector, i, {
+                tag: "div",
+                id: "",
+                className: "",
+                rect: { x: 0, y: 0, width: 0, height: 0 },
+              }),
+            );
+          }
+          return out;
+        }
+
+        /** Create host DOM nodes; returns style-proxy handles immediately. */
+        function createOnHost(html, opts) {
+          opts = opts || {};
+          var batchId = opts.batchId || nextBatchId();
+          var selector = batchSelector(batchId);
+          var count = Math.min(countTopLevelElements(html), CREATE_CHILD_CAP);
+          var callOpts = {
+            batchId: batchId,
+            position: opts.position,
+          };
+          if (opts.selector) callOpts.selector = opts.selector;
+          postParent({
+            type: "monacle-host-call",
+            method: opts._method || "create",
+            args: [html, callOpts],
+          });
+          return placeholderNodes(selector, count);
+        }
+
         function buildMonacle() {
+          function threeCall(cmd, a, b) {
+            var args = [cmd];
+            if (arguments.length > 1) args.push(a);
+            if (arguments.length > 2) args.push(b);
+            postParent({
+              type: "monacle-host-call",
+              method: "three",
+              args: args,
+            });
+          }
           return {
             query: function (selector) {
               postParent({
@@ -259,22 +390,48 @@
               var nodes = (hostState.queries && hostState.queries[selector]) || [];
               return wrapQueryNodes(selector, nodes);
             },
+            create: function (html, opts) {
+              return createOnHost(html, opts || {});
+            },
             insert: function (html, opts) {
-              postParent({
-                type: "monacle-host-call",
-                method: "insert",
-                args: [html, opts],
+              opts = opts || {};
+              return createOnHost(html, {
+                selector: opts.selector || "body",
+                position: opts.position || "append",
+                _method: "insert",
               });
-              return [];
             },
             overlay: null,
             canvas: function () {
-              if (!offscreenCanvas) {
-                throw new Error("Overlay canvas is not ready");
-              }
-              syncOffscreenToViewport();
-              if (!wrappedCanvas) wrappedCanvas = wrapOffscreen(offscreenCanvas);
-              return wrappedCanvas;
+              throw new Error(
+                "monacle.canvas() is disabled — use monacle.create() or monacle.three.*",
+              );
+            },
+            three: {
+              clear: function () {
+                threeCall("clear");
+              },
+              ensure: function () {
+                threeCall("ensure");
+              },
+              setBackground: function (value) {
+                threeCall("setBackground", value);
+              },
+              add: function (spec) {
+                threeCall("add", spec || {});
+              },
+              update: function (id, props) {
+                threeCall("update", id, props || {});
+              },
+              remove: function (id) {
+                threeCall("remove", id);
+              },
+              camera: function (spec) {
+                threeCall("camera", spec || {});
+              },
+              lights: function (list) {
+                threeCall("lights", list || []);
+              },
             },
             media: function () {
               return hostState.media || [];
@@ -289,7 +446,13 @@
                 runtimeTimeouts = runtimeTimeouts.filter(function (x) {
                   return x !== id;
                 });
-                fn();
+                if (runtimeTripped) return;
+                try {
+                  fn();
+                  errorStreak = 0;
+                } catch (e) {
+                  noteCallbackError(e);
+                }
               }, ms);
               runtimeTimeouts.push(id);
               return id;
@@ -355,10 +518,7 @@
             );
             run(buildMonacle(), undefined, undefined);
           } catch (err) {
-            postParent({
-              type: "monacle-runtime-error",
-              message: err && err.message ? err.message : String(err),
-            });
+            noteCallbackError(err);
           }
         }
 
@@ -368,6 +528,11 @@
 
           if (data.type === "monacle-run") {
             runPatchCode(data.id, data.code, data.context);
+            return;
+          }
+
+          // Host liveness probe — ignore (frame reuse checks contentWindow).
+          if (data.type === "monacle-ping") {
             return;
           }
 
@@ -384,15 +549,14 @@
 
           if (data.type === "monacle-runtime-stop") {
             stopRuntimeLocal();
-            offscreenCanvas = null;
             return;
           }
 
           if (data.type === "monacle-runtime-start") {
             stopRuntimeLocal();
+            runtimeTripped = false;
             if (data.token) runtimeToken = data.token;
             applyHostState(data);
-            offscreenCanvas = data.canvas || null;
             runLiveRuntime(data.code || "");
           }
         });

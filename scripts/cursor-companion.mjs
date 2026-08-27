@@ -1,6 +1,7 @@
 /**
  * Local bridge: Chrome talks to 127.0.0.1, this process runs your Cursor CLI.
- * Persistent remote machines later use the same /restyle contract.
+ * Concurrent /restyle sessions so the sidepanel and autonomous loops can
+ * share one companion. Persistent remote machines later use the same contract.
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -14,11 +15,16 @@ import {
   writeLog,
 } from "./companion-log.mjs";
 import {
+  SessionError,
+  activeCount,
   beginRun,
   endRun,
   ingestChunk,
+  ingestPayload,
   ingestStep,
   ingestThinking,
+  listSnapshots,
+  maxConcurrent,
   snapshot,
 } from "./companion-status.mjs";
 import { createStreamParser } from "./cli-stream.mjs";
@@ -79,10 +85,21 @@ function writeImages(images) {
   return { dir, paths };
 }
 
-function runAgent(prompt, model) {
+function chatWorkspace(sessionId) {
+  const safe = String(sessionId || "anon").replace(/[^a-zA-Z0-9._-]+/g, "_");
+  const dir = path.join(os.homedir(), ".monacle", "agent-chats", safe);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function runAgent(prompt, model, sessionId, opts = {}) {
   const agent = resolveAgent();
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "monacle-cli-"));
-  // stream-json exposes thinking + tool steps (Cursor-agent UI shape).
+  const resumeId =
+    typeof opts.resumeId === "string" && opts.resumeId.trim()
+      ? opts.resumeId.trim()
+      : null;
+  // Stable cwd per Monacle chat so --resume can find prior CLI state.
+  const cwd = chatWorkspace(sessionId);
   const args = [
     "-p",
     "--trust",
@@ -91,6 +108,7 @@ function runAgent(prompt, model) {
     "stream-json",
     "--stream-partial-output",
   ];
+  if (resumeId) args.push("--resume", resumeId);
   if (model) args.push("--model", model);
   args.push(prompt);
 
@@ -101,19 +119,32 @@ function runAgent(prompt, model) {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    // Plumbing stays in the log file; terminal shows agent steps.
-    writeLog(`cli spawn ${agent} timeout=${AGENT_TIMEOUT_MS}ms`, {
-      echo: false,
-    });
-    writeLog("Cursor agent started — streaming thinking & tools…");
+    writeLog(
+      `cli spawn ${agent}${resumeId ? ` --resume ${resumeId}` : ""} timeout=${AGENT_TIMEOUT_MS}ms`,
+      {
+        echo: false,
+        session: sessionId,
+      },
+    );
+    writeLog(
+      resumeId
+        ? "Cursor agent resumed — streaming thinking & tools…"
+        : "Cursor agent started — streaming thinking & tools…",
+      {
+        session: sessionId,
+      },
+    );
 
     const parser = createStreamParser({
       onStep: (line) => {
-        writeLog(line);
-        ingestStep(line);
+        writeLog(line, { session: sessionId });
+        ingestStep(sessionId, line);
       },
       onThinking: (full) => {
-        ingestThinking(full);
+        ingestThinking(sessionId, full);
+      },
+      onPayload: (text) => {
+        ingestPayload(sessionId, text);
       },
     });
 
@@ -127,24 +158,29 @@ function runAgent(prompt, model) {
     let stderr = "";
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
-      // Keep raw NDJSON in the file only (not the terminal).
       ingestRaw(text, "out");
-      // Re-read: ingestRaw echoes via writeLog. Need to fix that.
       parser.push(text);
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
       stderr += text;
-      // stderr rarely has useful agent UI; file it, surface short noise.
       for (const line of text.split(/\r?\n/)) {
         const t = line.trim();
-        if (t) writeLog(`[err] ${t}`, { echo: false, ring: false });
+        if (t) {
+          writeLog(`[err] ${t}`, {
+            echo: false,
+            ring: false,
+            session: sessionId,
+          });
+        }
       }
-      ingestChunk(text);
+      ingestChunk(sessionId, text);
     });
 
     const timer = setTimeout(() => {
-      writeLog(`cli timeout after ${AGENT_TIMEOUT_MS}ms — sending SIGTERM`);
+      writeLog(`cli timeout after ${AGENT_TIMEOUT_MS}ms — sending SIGTERM`, {
+        session: sessionId,
+      });
       child.kill("SIGTERM");
       setTimeout(() => {
         if (child.exitCode == null) child.kill("SIGKILL");
@@ -177,8 +213,15 @@ function runAgent(prompt, model) {
       clearTimeout(timer);
       parser.flush();
       const text = parser.finalText();
-      writeLog(`cli exit ${code} result=${text.length}b`, { echo: false });
-      fs.rmSync(cwd, { recursive: true, force: true });
+      const cursorSessionId = parser.cursorSessionId() || resumeId || null;
+      writeLog(
+        `cli exit ${code} result=${text.length}b cursorSession=${cursorSessionId || "-"}`,
+        {
+          echo: false,
+          session: sessionId,
+        },
+      );
+      // Keep ~/.monacle/agent-chats/<id> so follow-ups can --resume.
       if (code !== 0) {
         finish(() =>
           reject(
@@ -191,17 +234,31 @@ function runAgent(prompt, model) {
         );
         return;
       }
-      finish(() => resolve(text.trim()));
+      finish(() =>
+        resolve({
+          text: text.trim(),
+          cursorSessionId,
+        }),
+      );
     });
   });
 }
 
 function buildPrompt(body, imagePaths) {
-  const history = Array.isArray(body.history)
-    ? body.history
-        .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
-        .join("\n\n")
-    : "";
+  const resumeId =
+    typeof body.resumeId === "string" && body.resumeId.trim()
+      ? body.resumeId.trim()
+      : typeof body.cursorSessionId === "string" && body.cursorSessionId.trim()
+        ? body.cursorSessionId.trim()
+        : null;
+  // When resuming a Cursor chat, CLI already has prior turns — avoid dumping
+  // a full PRIOR TURNS transcript on top of that.
+  const history =
+    !resumeId && Array.isArray(body.history)
+      ? body.history
+          .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+          .join("\n\n")
+      : "";
 
   const imageBlock =
     imagePaths.length > 0
@@ -217,9 +274,12 @@ function buildPrompt(body, imagePaths) {
     "",
     "Do not edit any files. Reply only with the JSON patch (css + ops + overlayHtml + runtime as needed).",
     "A CSS-only patch is a failure when the user asked for a dynamic or environmental change — include runtime JS using monacle.*.",
+    "For 3D / 3js / moon: use monacle.three.* (bundled page-world Three.js). Do not use CDN Three, new THREE.WebGLRenderer, getContext('webgl'), or monacle.canvas(). DOM motion may use monacle.create().",
+    "If this is a follow-up in the same chat, modify the existing scene (incremental) unless the user asks for a full reset.",
     "If you emit a javascript fence instead of JSON, it is applied as live runtime on the page (not a sandbox).",
     "",
     history ? `PRIOR TURNS:\n${history}\n` : "",
+    resumeId ? "FOLLOW-UP TURN (same chat — continue the existing scene).\n" : "",
     "PAGE CONTEXT (sanitized):",
     JSON.stringify(
       {
@@ -228,6 +288,7 @@ function buildPrompt(body, imagePaths) {
         viewport: body.context?.viewport,
         media: body.context?.media,
         landmarks: body.context?.landmarks,
+        lastRuntimeError: body.context?.lastRuntimeError,
       },
       null,
       2,
@@ -235,9 +296,9 @@ function buildPrompt(body, imagePaths) {
     "",
     imageBlock,
     "USER REQUEST:",
-    body.prompt || "",
+    body.prompt || "(see attached images)",
   ]
-    .filter((line) => line !== undefined)
+    .filter((x) => x != null)
     .join("\n");
 }
 
@@ -272,14 +333,30 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${HOST}:${PORT}`);
 
   if (req.method === "GET" && url.pathname === "/status") {
-    json(res, 200, { ...snapshot(), logPath: logPath() });
+    const sessionId = url.searchParams.get("session");
+    json(res, 200, {
+      ...snapshot(sessionId),
+      logPath: logPath(),
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/sessions") {
+    json(res, 200, {
+      active: activeCount(),
+      maxConcurrent: maxConcurrent(),
+      sessions: listSnapshots(),
+    });
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/logs") {
+    const status = snapshot();
     json(res, 200, {
       logPath: logPath(),
-      running: snapshot().running,
+      running: status.running,
+      active: activeCount(),
+      sessions: status.sessions || [],
       lines: recentText(250).split("\n").filter(Boolean),
       text: recentText(250),
     });
@@ -293,12 +370,16 @@ const server = http.createServer(async (req, res) => {
       host: HOST,
       port: PORT,
       logPath: logPath(),
+      activeSessions: activeCount(),
+      maxConcurrent: maxConcurrent(),
+      sessions: listSnapshots().filter((s) => s.running),
     });
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/restyle") {
     let imageDir = null;
+    let session = null;
     try {
       const body = await readBody(req);
       if (!body.prompt && !(body.images && body.images.length)) {
@@ -307,25 +388,62 @@ const server = http.createServer(async (req, res) => {
       }
       const written = writeImages(body.images);
       imageDir = written.dir;
+      session = beginRun({
+        sessionId: body.sessionId || body.session,
+        model: body.model,
+        source: body.source,
+        prompt: body.prompt,
+      });
       writeLog(
         `Restyle: ${JSON.stringify(String(body.prompt || "").slice(0, 80))}`,
+        { session: session.id },
       );
-      beginRun(body.model);
-      const text = await runAgent(
+      const resumeId =
+        typeof body.resumeId === "string" && body.resumeId.trim()
+          ? body.resumeId.trim()
+          : typeof body.cursorSessionId === "string" &&
+              body.cursorSessionId.trim()
+            ? body.cursorSessionId.trim()
+            : null;
+      const result = await runAgent(
         buildPrompt(body, written.paths),
         body.model,
+        session.id,
+        { resumeId },
       );
-      writeLog(`Restyle ready (${text.length} chars)`);      json(res, 200, { text, imagePaths: written.paths });
+      const text = typeof result === "string" ? result : result.text || "";
+      const cursorSessionId =
+        (typeof result === "object" && result.cursorSessionId) ||
+        resumeId ||
+        null;
+      writeLog(
+        `Restyle ready (${text.length} chars)${cursorSessionId ? ` resume=${cursorSessionId}` : ""}`,
+        { session: session.id },
+      );
+      json(res, 200, {
+        text,
+        imagePaths: written.paths,
+        sessionId: session.id,
+        cursorSessionId,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      writeLog(`POST /restyle fail ${message}`);
-      json(res, 500, {
+      const status =
+        err instanceof SessionError && err.status ? err.status : 500;
+      writeLog(`POST /restyle fail ${message}`, {
+        session: session?.id,
+      });
+      json(res, status, {
         error: message,
+        code: err instanceof SessionError ? err.code : undefined,
+        sessionId: session?.id,
+        activeSessions: activeCount(),
+        sessions: listSnapshots(),
         logs: recentText(80),
         logPath: logPath(),
       });
     } finally {
-      endRun();
+      if (session) endRun(session.id);
       if (imageDir) {
         try {
           fs.rmSync(imageDir, { recursive: true, force: true });
@@ -340,8 +458,16 @@ const server = http.createServer(async (req, res) => {
   json(res, 404, { error: "Not found" });
 });
 
+// Long enough for concurrent agents (each can run up to AGENT_TIMEOUT_MS).
+server.requestTimeout = AGENT_TIMEOUT_MS + 30_000;
+server.headersTimeout = AGENT_TIMEOUT_MS + 60_000;
+server.timeout = AGENT_TIMEOUT_MS + 30_000;
+
 server.listen(PORT, HOST, () => {
   writeLog(`Companion ready on http://${HOST}:${PORT}`);
+  writeLog(
+    `Concurrent sessions enabled (max ${maxConcurrent()}). Sidepanel + loop can run together.`,
+  );
   writeLog(`Log file: ${logPath()}`, { echo: false });
   writeLog("Streaming Cursor agent thinking & tools into this terminal.");
 });

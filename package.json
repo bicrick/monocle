@@ -6,21 +6,30 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:vite": "vite",
-    "build": "tsc --noEmit && vite build && node scripts/copy-sandbox.mjs",
+    "build": "tsc --noEmit && node scripts/build-page-stage.mjs && vite build && node scripts/copy-sandbox.mjs && node scripts/build-page-stage.mjs",
     "preview": "vite preview",
-    "test": "npx --yes tsx scripts/test-schema.ts",
+    "test": "npx --yes tsx scripts/test-schema.ts && npx --yes tsx scripts/test-companion-sessions.ts && npx --yes tsx scripts/test-activity-detail.ts",
     "verify": "npm run build && node scripts/verify-extension.mjs",
     "companion": "node scripts/cursor-companion.mjs",
     "loop": "node scripts/ocean-loop.mjs",
     "loop:fixture": "node scripts/ocean-loop.mjs --fixture",
     "loop:replay": "node scripts/ocean-loop.mjs --replay logs/loop/last-patch.json",
+    "loop:moon": "node scripts/ocean-loop.mjs --url https://www.bicrick.com/about --prompt \"Make it look like I am loking at this about page on the moon in 3js\" --hold 25000",
+    "loop:moon:replay": "node scripts/ocean-loop.mjs --replay logs/loop/fixtures/moon-three-patch.json --url https://www.bicrick.com/about --hold 20000",
+    "loop:sequence": "node scripts/style-sequence.mjs",
+    "loop:youtube": "node scripts/style-sequence.mjs --preset youtube-golf",
     "hold": "node scripts/ocean-hold.mjs"
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.28",
     "@types/chrome": "^0.0.287",
+    "@types/three": "^0.170.0",
+    "esbuild": "^0.28.2",
     "puppeteer": "^25.9.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
   }
 }

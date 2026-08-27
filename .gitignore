@@ -4,6 +4,9 @@ node_modules/
 # Build output (unpacked extension is loaded from dist locally)
 dist/
 
+# Generated page-world Three.js IIFE (built by scripts/build-page-stage.mjs)
+src/page/threeStage.js
+
 # Environment and secrets
 .env
 .env.*
@@ -20,8 +23,9 @@ Thumbs.db
 .cursor/agent-tools/
 .cursor/scratch/
 
-# Chrome verify temp dirs
+# Chrome verify / loop temp dirs
 .chrome-verify-*/
+.chrome-loop-*/
 
 # Logs, coverage, Vite cache, local overrides
 logs/

@@ -5,12 +5,17 @@
 export function createStreamParser({
   onStep,
   onThinking,
+  onPayload,
 } = {}) {
   let buffer = "";
   let thinkingBuf = "";
   let assistantParts = [];
   let resultText = "";
   let sawResult = false;
+  let writingPatch = false;
+  let patchStepEmitted = false;
+  /** Cursor CLI chat id from stream-json events (for --resume). */
+  let cursorSessionId = null;
 
   function emitStep(line) {
     const text = String(line || "").trim();
@@ -21,6 +26,36 @@ export function createStreamParser({
   function emitThinking(delta) {
     thinkingBuf += delta;
     onThinking?.(thinkingBuf);
+  }
+
+  function isPatchText(text) {
+    const t = String(text || "").trim();
+    if (!t) return false;
+    if (t.startsWith("{") || t.startsWith("```")) return true;
+    if (/"overlayHtml"\s*:/.test(t) || /"css"\s*:/.test(t) || /"runtime"\s*:/.test(t)) {
+      return true;
+    }
+    if (/html\[data-monacle/.test(t) && /\{/.test(t)) return true;
+    return false;
+  }
+
+  function currentPayload() {
+    if (!assistantParts.length) return "";
+    let acc = "";
+    for (const part of assistantParts) {
+      if (!part) continue;
+      if (!acc) {
+        acc = part;
+        continue;
+      }
+      if (part.startsWith(acc) || part.includes(acc)) {
+        if (part.length > acc.length) acc = part;
+        continue;
+      }
+      if (acc.includes(part) || acc.endsWith(part)) continue;
+      acc += part;
+    }
+    return acc;
   }
 
   function toolLabel(toolCall) {
@@ -51,6 +86,9 @@ export function createStreamParser({
 
   function handleEvent(evt) {
     if (!evt || typeof evt !== "object") return;
+    if (typeof evt.session_id === "string" && evt.session_id.trim()) {
+      cursorSessionId = evt.session_id.trim();
+    }
     const type = evt.type;
 
     if (type === "system" && evt.subtype === "init") {
@@ -102,10 +140,14 @@ export function createStreamParser({
       }
       if (text) {
         assistantParts.push(text);
-        // Don't dump huge JSON patches into the step UI — just note progress.
         const trimmed = text.trim();
-        if (trimmed.startsWith("{") || trimmed.startsWith("```")) {
-          emitStep("Writing restyle patch…");
+        if (writingPatch || isPatchText(trimmed)) {
+          writingPatch = true;
+          if (!patchStepEmitted) {
+            patchStepEmitted = true;
+            emitStep("Writing restyle patch…");
+          }
+          onPayload?.(currentPayload());
         } else if (trimmed.length < 200) {
           emitStep(trimmed);
         } else {
@@ -118,6 +160,9 @@ export function createStreamParser({
     if (type === "result") {
       sawResult = true;
       if (typeof evt.result === "string") resultText = evt.result;
+      if (resultText && (writingPatch || isPatchText(resultText))) {
+        onPayload?.(resultText);
+      }
       if (evt.subtype === "success") {
         emitStep(
           evt.duration_ms
@@ -188,5 +233,5 @@ export function createStreamParser({
     return best.trim();
   }
 
-  return { push, flush, finalText };
+  return { push, flush, finalText, cursorSessionId: () => cursorSessionId };
 }

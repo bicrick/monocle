@@ -1,4 +1,10 @@
 import type { InsertPosition, Patch, PatchOp } from "../shared/types";
+import {
+  isExtensionApiRuntime,
+  unsupportedRuntimeReason,
+} from "../sandbox/runtimePolicy";
+
+export { unsupportedRuntimeReason };
 
 const MEDIA_TAGS = new Set(["VIDEO", "AUDIO"]);
 
@@ -13,9 +19,6 @@ const INSERT_POSITIONS = new Set<InsertPosition>([
   "append",
 ]);
 
-/** Reject runtime that clearly reaches extension APIs. */
-const FORBIDDEN_RUNTIME_RE = /\b(?:chrome|browser)\s*\./;
-
 export function isProtectedElement(el: Element): boolean {
   if (MEDIA_TAGS.has(el.tagName)) return true;
   if (el.querySelector("video, audio")) return true;
@@ -28,8 +31,9 @@ export function isProtectedElement(el: Element): boolean {
   return false;
 }
 
+/** True unless the runtime clearly reaches extension APIs (blocks whole patch). */
 export function isRuntimeSourceAllowed(code: string): boolean {
-  return !FORBIDDEN_RUNTIME_RE.test(code);
+  return !isExtensionApiRuntime(code);
 }
 
 export function validatePatch(raw: unknown): Patch | null {

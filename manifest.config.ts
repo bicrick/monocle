@@ -44,7 +44,7 @@ export default defineManifest({
   },
   web_accessible_resources: [
     {
-      resources: ["src/sandbox/sandbox.html"],
+      resources: ["src/sandbox/sandbox.html", "src/page/threeStage.js"],
       matches: ["<all_urls>"],
     },
   ],

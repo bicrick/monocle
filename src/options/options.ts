@@ -40,9 +40,15 @@ async function pingCompanion(): Promise<void> {
       ok?: boolean;
       agent?: string;
       logPath?: string;
+      activeSessions?: number;
+      maxConcurrent?: number;
     };
+    const load =
+      data.maxConcurrent != null
+        ? ` — ${data.activeSessions ?? 0}/${data.maxConcurrent} agents`
+        : "";
     companionStatus.textContent = data.ok
-      ? `Companion: running (${data.agent || "agent"})`
+      ? `Companion: running (${data.agent || "agent"})${load}`
       : "Companion: reached, but not ready";
     companionLog.textContent = data.logPath
       ? `Logs: ${data.logPath}`

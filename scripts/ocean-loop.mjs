@@ -14,54 +14,28 @@
  * Replay mode skips the CLI and re-applies last-patch.json (fast crash iteration).
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import puppeteer from "puppeteer";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, "..");
-const dist = path.join(root, "dist");
-const fixture = path.join(__dirname, "fixtures/blog.html");
-const chromePath =
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const companionBase = (
-  process.env.MONACLE_COMPANION || "http://127.0.0.1:8787"
-).replace(/\/$/, "");
-
-/** Minimal patch extract (mirrors src/patches/schema extractPatchFromText). */
-function extractPatchFromText(text) {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidates = [fenced?.[1], text];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    const trimmed = candidate.trim();
-    const start = trimmed.indexOf("{");
-    const end = trimmed.lastIndexOf("}");
-    if (start < 0 || end <= start) continue;
-    try {
-      const parsed = JSON.parse(trimmed.slice(start, end + 1));
-      if (parsed && typeof parsed === "object") return parsed;
-    } catch {
-      // keep trying
-    }
-  }
-  return null;
-}
-
-function loadSystemPrompt() {
-  const src = fs.readFileSync(
-    path.join(root, "src/agent/systemPrompt.ts"),
-    "utf8",
-  );
-  const match = src.match(/export const SYSTEM_PROMPT = `([\s\S]*)`;\s*$/);
-  if (!match) {
-    return "You are Monacle. Reply with one JSON patch (css, ops, overlayHtml, runtime).";
-  }
-  return match[1].replace(/\\`/g, "`").replace(/\\\$/g, "$");
-}
+import {
+  applyPatch,
+  authRequiredExit,
+  chromePath,
+  companionHealth,
+  companionLogs,
+  dist,
+  ensureDir,
+  fetchSnapshot,
+  getWorker,
+  liveRestyle,
+  loadSystemPrompt,
+  probe,
+  requireCompanionOrExit,
+  root,
+  runBuild,
+  serveFixture,
+} from "./loop-lib.mjs";
 
 const SYSTEM_PROMPT = loadSystemPrompt();
 
@@ -92,187 +66,6 @@ function log(msg) {
   console.log(`[loop] ${msg}`);
 }
 
-function ensureDir(p) {
-  fs.mkdirSync(p, { recursive: true });
-}
-
-async function companionHealth() {
-  try {
-    const res = await fetch(`${companionBase}/health`);
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  }
-}
-
-async function companionLogs(limit = 120) {
-  try {
-    const res = await fetch(`${companionBase}/logs`);
-    if (!res.ok) return "";
-    const data = await res.json();
-    return data.text || (data.lines || []).slice(-limit).join("\n");
-  } catch {
-    return "";
-  }
-}
-
-function serveFixture() {
-  const html = fs.readFileSync(fixture);
-  const server = http.createServer((_req, res) => {
-    res.writeHead(200, { "content-type": "text/html" });
-    res.end(html);
-  });
-  return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      if (!addr || typeof addr === "string") throw new Error("no port");
-      resolve({ server, url: `http://127.0.0.1:${addr.port}/` });
-    });
-  });
-}
-
-async function getWorker(browser, extId) {
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    for (const t of browser.targets()) {
-      if (
-        t.type() === "service_worker" &&
-        t.url().includes(`chrome-extension://${extId}/`)
-      ) {
-        const w = await t.worker();
-        if (w) return w;
-      }
-    }
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  throw new Error("service worker not found — extension likely crashed");
-}
-
-function runBuild() {
-  return new Promise((resolve, reject) => {
-    log("building dist/ …");
-    const child = spawn("npm", ["run", "build"], {
-      cwd: root,
-      env: process.env,
-      stdio: "inherit",
-      shell: process.platform === "win32",
-    });
-    child.on("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`npm run build exited ${code}`));
-    });
-  });
-}
-
-async function fetchSnapshot(worker, pageUrl) {
-  return worker.evaluate(async (targetUrl) => {
-    const tabs = await chrome.tabs.query({});
-    const tab = tabs.find((t) => t.url && t.url.startsWith(targetUrl));
-    if (!tab?.id) return { ok: false, error: "tab not found" };
-    try {
-      const snap = await chrome.tabs.sendMessage(tab.id, {
-        type: "GET_SNAPSHOT",
-      });
-      if (snap?.type !== "SNAPSHOT") {
-        return { ok: false, error: "bad snapshot response" };
-      }
-      return { ok: true, tabId: tab.id, context: snap.context };
-    } catch (e) {
-      return { ok: false, error: String(e) };
-    }
-  }, pageUrl);
-}
-
-async function applyPatch(worker, pageUrl, patch) {
-  return worker.evaluate(
-    async (targetUrl, p) => {
-      const tabs = await chrome.tabs.query({});
-      const tab = tabs.find((t) => t.url && t.url.startsWith(targetUrl));
-      if (!tab?.id) return { ok: false, error: "tab not found" };
-      try {
-        const applied = await chrome.tabs.sendMessage(tab.id, {
-          type: "APPLY_PATCH",
-          patch: p,
-        });
-        return {
-          ok: applied?.type === "PATCH_APPLIED" ? !!applied.ok : true,
-          applied,
-        };
-      } catch (e) {
-        return { ok: false, error: String(e) };
-      }
-    },
-    pageUrl,
-    patch,
-  );
-}
-
-async function probe(worker, pageUrl) {
-  return worker.evaluate(async (targetUrl) => {
-    const tabs = await chrome.tabs.query({});
-    const tab = tabs.find((t) => t.url && t.url.startsWith(targetUrl));
-    if (!tab?.id) return { ok: false, error: "tab missing after hold" };
-    try {
-      const snap = await chrome.tabs.sendMessage(tab.id, {
-        type: "GET_SNAPSHOT",
-      });
-      const state = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => ({
-          monacleOn: document.documentElement.getAttribute("data-monacle"),
-          overlay: !!document.getElementById("monacle-overlay"),
-          frame: !!document.getElementById("monacle-runtime-frame"),
-          inserts: document.querySelectorAll("[data-monacle-insert]").length,
-          video: !!document.querySelector("video"),
-          title: document.title,
-        }),
-      });
-      return {
-        ok: true,
-        snap: snap?.type === "SNAPSHOT",
-        state: state?.[0]?.result,
-      };
-    } catch (e) {
-      return { ok: false, error: String(e), crashed: true };
-    }
-  }, pageUrl);
-}
-
-async function liveRestyle(prompt, context) {
-  const res = await fetch(`${companionBase}/restyle`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      systemPrompt: SYSTEM_PROMPT,
-      prompt,
-      history: [],
-      context,
-    }),
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(
-      body.error || `companion /restyle ${res.status}`,
-    );
-    err.code =
-      /login|auth|ENOENT|not found/i.test(String(body.error || ""))
-        ? "AUTH_REQUIRED"
-        : "RESTYLE_FAILED";
-    err.logs = body.logs;
-    throw err;
-  }
-  const text = body.text || "";
-  const patch = extractPatchFromText(text);
-  if (!patch) {
-    const err = new Error("Companion returned no valid JSON patch");
-    err.code = "NO_PATCH";
-    err.text = text.slice(0, 2000);
-    throw err;
-  }
-  return { text, patch };
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -281,21 +74,13 @@ async function main() {
   ensureDir(path.join(root, "logs/loop"));
 
   const health = await companionHealth();
-  if (!health?.ok) {
-    console.error(`
-Companion not reachable at ${companionBase}
-Start the stack first:
-
-  npm run dev
-
-Then re-run: npm run loop
-`);
-    process.exit(2);
-  }
-  log(`companion ok (${health.agent || "agent"})`);
+  requireCompanionOrExit(health, "loop");
+  log(
+    `companion ok (${health.agent || "agent"}) sessions=${health.activeSessions ?? 0}/${health.maxConcurrent ?? "?"}`,
+  );
 
   if (args.build || !fs.existsSync(path.join(dist, "manifest.json"))) {
-    await runBuild();
+    await runBuild(log);
   }
   assert.ok(
     fs.existsSync(path.join(dist, "src/sandbox/sandbox.html")),
@@ -332,7 +117,11 @@ Then re-run: npm run loop
     log(`extension ${extId}`);
     fs.writeFileSync(
       path.join(outDir, "meta.json"),
-      JSON.stringify({ extId, pageUrl, prompt: args.prompt, hold: args.hold }, null, 2),
+      JSON.stringify(
+        { extId, pageUrl, prompt: args.prompt, hold: args.hold },
+        null,
+        2,
+      ),
     );
 
     const page = await browser.newPage();
@@ -365,19 +154,14 @@ Then re-run: npm run loop
     } else {
       log(`live /restyle: ${JSON.stringify(args.prompt.slice(0, 80))}`);
       try {
-        const live = await liveRestyle(args.prompt, snap.context);
+        const live = await liveRestyle(args.prompt, snap.context, SYSTEM_PROMPT, {
+          source: "loop",
+        });
         patch = live.patch;
         rawText = live.text;
       } catch (err) {
         if (err.code === "AUTH_REQUIRED") {
-          console.error(`
-AUTH_REQUIRED — Cursor CLI needs login.
-
-  agent login
-
-Then: npm run loop
-`);
-          process.exit(3);
+          authRequiredExit("npm run loop");
         }
         throw err;
       }
@@ -411,7 +195,6 @@ Then: npm run loop
 
     await new Promise((r) => setTimeout(r, args.hold));
 
-    // Re-resolve worker — crash invalidates the old one.
     try {
       worker = await getWorker(browser, extId);
     } catch (err) {
@@ -442,7 +225,8 @@ Then: npm run loop
     log("PASS — scene survived hold, service worker alive");
     console.log(JSON.stringify(result.state, null, 2));
   } catch (err) {
-    failReason = failReason || (err instanceof Error ? err.message : String(err));
+    failReason =
+      failReason || (err instanceof Error ? err.message : String(err));
     log(`FAIL — ${failReason}`);
     passed = false;
   } finally {
@@ -463,7 +247,9 @@ Then: npm run loop
 
   log(`artifacts: ${outDir}`);
   if (!passed) {
-    log("iterate: fix code, then npm run loop -- --replay logs/loop/last-patch.json");
+    log(
+      "iterate: fix code, then npm run loop -- --replay logs/loop/last-patch.json",
+    );
     process.exit(1);
   }
 }

@@ -29,8 +29,7 @@ export function createLogDrawer(host: HTMLElement): {
   let base = "http://127.0.0.1:8787";
   let timer: number | null = null;
   let stickBottom = true;
-  let userClosedThisRun = false;
-  let busy = false;
+  root.open = false;
 
   pre.addEventListener("scroll", () => {
     const slack = 24;
@@ -47,7 +46,17 @@ export function createLogDrawer(host: HTMLElement): {
         logPath?: string;
         text?: string;
         lines?: string[];
+        active?: number;
       };
+      const titleEl = summary.querySelector(
+        ".log-drawer-title",
+      ) as HTMLElement | null;
+      if (titleEl) {
+        titleEl.textContent =
+          data.active && data.active > 0
+            ? `Companion logs (${data.active} running)`
+            : "Companion logs";
+      }
       if (pathEl) {
         pathEl.textContent = data.logPath
           ? data.logPath.replace(/^.*\/(logs\/)/, "$1")
@@ -81,11 +90,9 @@ export function createLogDrawer(host: HTMLElement): {
 
   root.addEventListener("toggle", () => {
     if (root.open) {
-      userClosedThisRun = false;
       stickBottom = true;
       startPoll();
     } else {
-      if (busy) userClosedThisRun = true;
       stopPoll();
     }
   });
@@ -103,20 +110,13 @@ export function createLogDrawer(host: HTMLElement): {
       if (root.open) {
         root.open = false;
         stopPoll();
-        if (busy) userClosedThisRun = true;
         return;
       }
       root.open = true;
-      userClosedThisRun = false;
       startPoll();
     },
-    setBusy(next: boolean) {
-      busy = next;
-      if (next && !userClosedThisRun) {
-        root.open = true;
-        startPoll();
-      }
-      if (!next) userClosedThisRun = false;
+    setBusy(_next: boolean) {
+      // Stay collapsed until the user opens the drawer.
     },
     start(baseUrl: string) {
       if (baseUrl) base = baseUrl;

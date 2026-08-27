@@ -14,6 +14,15 @@ import { createProvider, loadSettings, saveSettings } from "../agent";
 import { validatePatch } from "../patches/schema";
 import * as sessions from "./sessions";
 
+self.addEventListener("error", (event) => {
+  event.preventDefault();
+  console.warn("[Monacle] service worker error", event.message);
+});
+self.addEventListener("unhandledrejection", (event) => {
+  event.preventDefault();
+  console.warn("[Monacle] service worker rejection", event.reason);
+});
+
 /** Per-tab runtime cache — chat content lives in chrome.storage via sessions. */
 interface TabRuntime {
   chatSessionId: string | null;
@@ -22,7 +31,12 @@ interface TabRuntime {
   hasPatch: boolean;
   lastContext: PageContext | null;
   activity: ActivityLine[];
+  lastApplyAt: number;
+  repairUsed: boolean;
+  pendingRepair: string | null;
 }
+
+const REPAIR_WINDOW_MS = 2000;
 
 const tabs = new Map<number, TabRuntime>();
 
@@ -36,6 +50,9 @@ function getTab(tabId: number): TabRuntime {
       hasPatch: false,
       lastContext: null,
       activity: [],
+      lastApplyAt: 0,
+      repairUsed: false,
+      pendingRepair: null,
     };
     tabs.set(tabId, state);
   }
@@ -127,15 +144,31 @@ async function getSnapshot(tabId: number): Promise<PageContext> {
   }
 }
 
-async function applyPatchToTab(tabId: number, patch: Patch): Promise<void> {
-  const res = (await chrome.tabs.sendMessage(tabId, {
-    type: "APPLY_PATCH",
-    patch,
-  })) as RuntimeMessage;
-  if (res?.type === "PATCH_APPLIED" && !res.ok) {
-    throw new Error(res.error || "Failed to apply patch");
+async function applyPatchToTab(tabId: number, patch: Patch): Promise<{
+  opErrors?: string[];
+  runtimeStarted?: boolean;
+}> {
+  const tab = getTab(tabId);
+  tab.lastApplyAt = Date.now();
+  try {
+    const res = (await chrome.tabs.sendMessage(tabId, {
+      type: "APPLY_PATCH",
+      patch,
+    })) as RuntimeMessage;
+    if (res?.type === "PATCH_APPLIED") {
+      tab.hasPatch = Boolean(
+        patch.css || patch.overlayHtml || patch.ops || res.runtimeStarted,
+      );
+      const opErrors = [...(res.opErrors ?? [])];
+      if (!res.ok && res.error) opErrors.unshift(res.error);
+      return { opErrors: opErrors.length ? opErrors : undefined, runtimeStarted: res.runtimeStarted };
+    }
+    tab.hasPatch = true;
+    return {};
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { opErrors: [message], runtimeStarted: false };
   }
-  getTab(tabId).hasPatch = true;
 }
 
 async function resetTab(tabId: number): Promise<void> {
@@ -188,15 +221,53 @@ async function pushMessage(
   void tabId;
 }
 
+function repairPromptFor(error: string): string {
+  return [
+    "The previous restyle failed. The page and extension are still running.",
+    `Error: ${error}`,
+    "",
+    "Keep any CSS, overlayHtml, and ops that still work. Emit a different JSON patch that avoids this failure. Do not repeat the same runtime.",
+  ].join("\n");
+}
+
+function withRuntimeErrorHint(prompt: string, lastError?: string): string {
+  if (!lastError?.trim()) return prompt;
+  return `${prompt}\n\n[Monacle] Previous restyle failed (extension stayed up): ${lastError.trim()}. Keep working CSS/ops; emit a safer patch.`;
+}
+
+async function maybeStartRepair(
+  tabId: number,
+  error: string,
+  fatal = false,
+): Promise<void> {
+  if (!fatal) return;
+  const runtime = getTab(tabId);
+  if (runtime.repairUsed) return;
+  if (!runtime.lastApplyAt || Date.now() - runtime.lastApplyAt > REPAIR_WINDOW_MS) {
+    return;
+  }
+  if (runtime.busy) {
+    runtime.pendingRepair = error;
+    return;
+  }
+  runtime.repairUsed = true;
+  runtime.pendingRepair = null;
+  await handlePrompt(tabId, repairPromptFor(error), runtime.chatSessionId ?? undefined, undefined, {
+    isRepair: true,
+  });
+}
+
 async function handlePrompt(
   tabId: number,
   prompt: string,
   sessionIdHint?: string,
   images?: PromptImage[],
+  opts?: { isRepair?: boolean },
 ): Promise<void> {
   const runtime = getTab(tabId);
   if (runtime.busy) return;
   runtime.busy = true;
+  if (!opts?.isRepair) runtime.repairUsed = false;
 
   let chat: ChatSession | null = null;
   if (sessionIdHint) {
@@ -206,17 +277,32 @@ async function handlePrompt(
   runtime.chatSessionId = chat.id;
   const sessionId = chat.id;
 
-  await pushMessage(tabId, sessionId, {
-    role: "user",
-    content: prompt,
-    ts: Date.now(),
-  });
+  if (opts?.isRepair) {
+    await pushMessage(tabId, sessionId, {
+      role: "system",
+      content: "Repairing the scene after a runtime error.",
+      ts: Date.now(),
+    });
+  } else {
+    await pushMessage(tabId, sessionId, {
+      role: "user",
+      content: prompt,
+      ts: Date.now(),
+    });
+  }
   runtime.activity = [];
-  await progress(tabId, sessionId, "Reading the page");
+  await progress(
+    tabId,
+    sessionId,
+    opts?.isRepair ? "Repairing scene" : "Reading the page",
+  );
 
   try {
     const provider = await createProvider();
     const context = await getSnapshot(tabId);
+    if (chat.lastRuntimeError) {
+      context.lastRuntimeError = chat.lastRuntimeError;
+    }
     runtime.lastContext = context;
     await sessions.touchPageMeta(sessionId, context.url, context.title);
     await progress(
@@ -227,25 +313,50 @@ async function handlePrompt(
       `${context.title}\n${context.url}`,
     );
 
-    if (!runtime.agentSession || runtime.agentSession.pageUrl !== context.url) {
-      runtime.agentSession = await provider.startSession(context, tabId);
+    if (!runtime.agentSession || runtime.agentSession.id !== chat.id) {
+      runtime.agentSession = {
+        id: chat.id,
+        tabId,
+        kind: "persistent",
+        pageUrl: context.url,
+        createdAt: chat.createdAt,
+        cursorSessionId: chat.cursorSessionId,
+      };
+    } else {
+      runtime.agentSession.pageUrl = context.url;
+      runtime.agentSession.cursorSessionId =
+        chat.cursorSessionId || runtime.agentSession.cursorSessionId;
     }
 
-    await progress(tabId, sessionId, "Asking Cursor");
+    await progress(
+      tabId,
+      sessionId,
+      runtime.agentSession.cursorSessionId
+        ? "Continuing chat"
+        : "Asking Cursor",
+    );
 
     const fresh = await sessions.getSession(sessionId);
     const llmHistory = fresh?.history ?? [];
+    const sendPrompt = opts?.isRepair
+      ? prompt
+      : withRuntimeErrorHint(prompt, fresh?.lastRuntimeError);
 
     let assistantText = "";
     let applied = false;
 
     for await (const event of provider.send(
       runtime.agentSession,
-      prompt,
+      sendPrompt,
       llmHistory,
       context,
       images,
     )) {
+      if (event.type === "cursor_session") {
+        runtime.agentSession.cursorSessionId = event.cursorSessionId;
+        await sessions.setCursorSessionId(sessionId, event.cursorSessionId);
+        continue;
+      }
       if (event.type === "text") {
         assistantText += event.text;
       } else if (event.type === "patch") {
@@ -254,8 +365,18 @@ async function handlePrompt(
           sessionId,
           event.patch.runtime ? "Applying scene" : "Applying restyle",
         );
-        await applyPatchToTab(tabId, event.patch);
+        const appliedResult = await applyPatchToTab(tabId, event.patch);
         applied = true;
+        await sessions.setLastRuntimeError(sessionId, undefined);
+        if (appliedResult.opErrors?.length) {
+          await progress(
+            tabId,
+            sessionId,
+            "Scene applied with warnings",
+            "done",
+            appliedResult.opErrors.join("\n"),
+          );
+        }
         const note =
           event.patch.message ||
           (event.patch.runtime ? "Applied scene." : "Applied restyle.");
@@ -277,6 +398,7 @@ async function handlePrompt(
           await progress(tabId, sessionId, "Applying scene");
           await applyPatchToTab(tabId, patch);
           applied = true;
+          await sessions.setLastRuntimeError(sessionId, undefined);
           const note = patch.message || "Applied scene.";
           assistantText = note;
           broadcast(tabId, { type: "text", text: note }, sessionId);
@@ -337,7 +459,7 @@ async function handlePrompt(
       });
       const updated = await sessions.getSession(sessionId);
       if (updated) {
-        updated.history.push({ role: "user", content: prompt });
+        updated.history.push({ role: "user", content: sendPrompt });
         updated.history.push({
           role: "assistant",
           content: assistantText.trim(),
@@ -370,12 +492,66 @@ async function handlePrompt(
     // cannot re-apply busy=true after the composer unlocked.
     runtime.busy = false;
     broadcast(tabId, { type: "done" }, sessionId);
+    const queued = runtime.pendingRepair;
+    if (queued) {
+      runtime.pendingRepair = null;
+      void maybeStartRepair(tabId, queued, true);
+    }
   }
 }
 
-chrome.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendResponse) => {
   (async () => {
     switch (message.type) {
+      case "RUNTIME_ERROR": {
+        const tabId = sender.tab?.id ?? message.tabId;
+        if (tabId == null) {
+          sendResponse({ ok: false });
+          break;
+        }
+        const tab = getTab(tabId);
+        const sessionId = tab.chatSessionId;
+        const text = message.message || "Scene runtime failed";
+        if (sessionId) {
+          await sessions.setLastRuntimeError(sessionId, text);
+          await progress(
+            tabId,
+            sessionId,
+            message.fatal ? "Scene runtime stopped" : "Scene runtime error",
+            "error",
+            text,
+          );
+        }
+        broadcast(
+          tabId,
+          { type: "error", message: text },
+          sessionId,
+        );
+        sendResponse({ ok: true });
+        void maybeStartRepair(tabId, text, Boolean(message.fatal));
+        break;
+      }
+      case "INJECT_THREE_STAGE": {
+        const tabId = sender.tab?.id;
+        if (tabId == null) {
+          sendResponse({ ok: false, error: "no tab" });
+          break;
+        }
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            files: ["src/page/threeStage.js"],
+            world: "MAIN",
+          });
+          sendResponse({ ok: true });
+        } catch (err) {
+          sendResponse({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        break;
+      }
       case "GET_SETTINGS": {
         const settings = await loadSettings();
         sendResponse({ type: "SETTINGS", settings } satisfies RuntimeMessage);
@@ -409,7 +585,15 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResp
         const runtime = getTab(message.tabId);
         runtime.chatSessionId = existing.id;
         runtime.activity = existing.activity ?? [];
-        runtime.agentSession = null;
+        // Rebind the same Cursor agent chat — do not mint a fresh sess_*.
+        runtime.agentSession = {
+          id: existing.id,
+          tabId: message.tabId,
+          kind: "persistent",
+          pageUrl: existing.url,
+          createdAt: existing.createdAt,
+          cursorSessionId: existing.cursorSessionId,
+        };
         sendResponse(await buildTabState(message.tabId));
         break;
       }
@@ -422,7 +606,14 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResp
         const runtime = getTab(message.tabId);
         runtime.chatSessionId = created.id;
         runtime.activity = [];
-        runtime.agentSession = null;
+        // New Monacle chat → new Cursor agent session (no --resume yet).
+        runtime.agentSession = {
+          id: created.id,
+          tabId: message.tabId,
+          kind: "persistent",
+          pageUrl: created.url,
+          createdAt: created.createdAt,
+        };
         sendResponse(await buildTabState(message.tabId));
         break;
       }
