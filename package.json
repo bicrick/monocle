@@ -1,0 +1,21 @@
+{
+  "name": "monacle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "npx --yes tsx scripts/test-schema.ts",
+    "verify": "npm run build && node scripts/verify-extension.mjs",
+    "companion": "node scripts/cursor-companion.mjs"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.28",
+    "@types/chrome": "^0.0.287",
+    "puppeteer": "^25.9.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  }
+}

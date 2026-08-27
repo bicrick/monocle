@@ -1,0 +1,40 @@
+---
+description: Keep the Vite/CRXJS extension dev server running for instant reloads
+alwaysApply: true
+---
+
+# Vite / CRXJS Dev Server
+
+This is a Chrome extension built with Vite + `@crxjs/vite-plugin`. During local iteration, keep `npm run dev` running so CRXJS/Vite HMR reloads the unpacked extension. Do not default to `npm run build` plus a manual Chrome reload.
+
+## Prefer `npm run dev`
+
+- Use `npm run dev` (not one-off `npm run build`) while editing extension code.
+- After changes, rely on Vite HMR / CRXJS reload. Do not tell the user to rebuild `dist/` or reload Chrome unless they asked for a production build (`npm run build`, `npm run verify`).
+- `npm run build` is for production / verify only.
+
+## Check before starting
+
+Typical Vite/CRXJS URL: `http://localhost:5173` (Vite default; often `[::1]:5173` on macOS, not `127.0.0.1`). If 5173 is busy, Vite may use 5174+.
+
+```bash
+# already up? do not start a second server
+curl -sS -m 1 -o /dev/null -w "%{http_code}" http://localhost:5173/
+lsof -nP -iTCP:5173 -sTCP:LISTEN
+```
+
+Also scan existing terminals for `vite` / `npm run dev`.
+
+- If a healthy Vite process is already serving: leave it alone. Never kill it.
+- If nothing is listening: start in the background from the repo root with PATH as needed:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+npm run dev
+```
+
+Working directory: `/Users/pbrown/Desktop/Monacle`.
+
+## Companion is separate
+
+`npm run companion` (`127.0.0.1:8787`) is the Cursor CLI bridge. Keep it running when testing Cursor CLI restyles. Do not treat it as a substitute for Vite. This rule is about the Vite/CRXJS dev server.

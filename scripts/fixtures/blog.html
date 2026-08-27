@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Monacle fixture blog</title>
+    <style>
+      body { font-family: system-ui; margin: 0; background: #fafafa; color: #111; }
+      header { padding: 12px 20px; background: #fff; border-bottom: 1px solid #ddd; }
+      #secondary { position: fixed; right: 0; top: 48px; width: 280px; padding: 16px; background: #eee; height: 100%; }
+      #player-container { margin: 24px; max-width: 720px; }
+      video { width: 100%; background: #000; }
+      #comments { margin: 24px; max-width: 720px; }
+    </style>
+  </head>
+  <body>
+    <header id="masthead">Fixture Site Header / Nav</header>
+    <div id="secondary">Related sidebar chrome</div>
+    <div id="player-container">
+      <div id="movie_player">
+        <video id="vid" controls muted loop playsinline></video>
+      </div>
+    </div>
+    <div id="comments">Comment section chrome</div>
+    <script>
+      const v = document.getElementById("vid");
+      // Tiny valid muted video via canvas MediaStream
+      const c = document.createElement("canvas");
+      c.width = 640;
+      c.height = 360;
+      const ctx = c.getContext("2d");
+      function draw(t) {
+        ctx.fillStyle = "#102a43";
+        ctx.fillRect(0, 0, c.width, c.height);
+        ctx.fillStyle = "#f0f4f8";
+        ctx.font = "32px system-ui";
+        ctx.fillText("Monacle fixture " + Math.floor(t / 1000), 40, 180);
+        requestAnimationFrame(draw);
+      }
+      requestAnimationFrame(draw);
+      v.srcObject = c.captureStream(30);
+      v.play().catch(() => {});
+    </script>
+  </body>
+</html>

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Monacle Settings</title>
+    <link rel="stylesheet" href="./options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Monacle</h1>
+      <p class="muted">
+        Default: your local Cursor CLI. The extension talks to a companion on this machine. Persistent remote machines later.
+      </p>
+
+      <label>
+        Provider
+        <select id="provider">
+          <option value="cursor-cli">Cursor CLI (this machine)</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+          <option value="xai">xAI (Grok)</option>
+        </select>
+      </label>
+
+      <p id="cli-help" class="muted">
+        In a terminal: <code>npm run companion</code> after <code>agent login</code>.
+        Companion should be at the base URL below.
+      </p>
+      <p id="companion-status" class="muted">Companion: checking…</p>
+      <p id="companion-log" class="muted" hidden></p>
+
+      <label>
+        Model
+        <input id="model" type="text" spellcheck="false" />
+      </label>
+
+      <label id="api-key-label">
+        API key
+        <input id="apiKey" type="password" spellcheck="false" autocomplete="off" />
+      </label>
+
+      <label>
+        Base URL
+        <input id="baseUrl" type="url" spellcheck="false" placeholder="optional override" />
+      </label>
+
+      <div class="row">
+        <button type="button" id="save">Save</button>
+        <span id="saved" class="muted" hidden>Saved</span>
+      </div>
+    </main>
+    <script type="module" src="./options.ts"></script>
+  </body>
+</html>

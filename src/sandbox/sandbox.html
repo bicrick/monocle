@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Monacle Sandbox</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      (function () {
+        var hostState = { media: [], viewport: { width: 0, height: 0 }, queries: {} };
+        var runtimeCleanups = [];
+        var runtimeRafs = [];
+        var runtimeTimeouts = [];
+        var runtimeCanvas = null;
+        var runtimeToken = "";
+
+        function postParent(payload) {
+          parent.postMessage(
+            Object.assign({ source: "monacle-sandbox", token: runtimeToken }, payload),
+            "*",
+          );
+        }
+
+        function reply(id, payload) {
+          postParent({
+            type: "monacle-patch-result",
+            id: id,
+            patch: payload.patch,
+            error: payload.error,
+          });
+        }
+
+        function stopRuntimeLocal() {
+          for (var i = 0; i < runtimeCleanups.length; i++) {
+            try {
+              runtimeCleanups[i]();
+            } catch (e) {}
+          }
+          runtimeCleanups = [];
+          for (var j = 0; j < runtimeRafs.length; j++) {
+            cancelAnimationFrame(runtimeRafs[j]);
+          }
+          runtimeRafs = [];
+          for (var k = 0; k < runtimeTimeouts.length; k++) {
+            clearTimeout(runtimeTimeouts[k]);
+          }
+          runtimeTimeouts = [];
+          if (runtimeCanvas && runtimeCanvas.parentNode) {
+            runtimeCanvas.parentNode.removeChild(runtimeCanvas);
+          }
+          runtimeCanvas = null;
+        }
+
+        function buildMonacle() {
+          return {
+            query: function (selector) {
+              postParent({
+                type: "monacle-host-call",
+                method: "query",
+                args: [selector],
+              });
+              return (hostState.queries && hostState.queries[selector]) || [];
+            },
+            insert: function (html, opts) {
+              postParent({
+                type: "monacle-host-call",
+                method: "insert",
+                args: [html, opts],
+              });
+              return [];
+            },
+            overlay: null,
+            canvas: function () {
+              if (!runtimeCanvas) {
+                runtimeCanvas = document.createElement("canvas");
+                runtimeCanvas.setAttribute("data-monacle-canvas", "1");
+                runtimeCanvas.style.position = "fixed";
+                runtimeCanvas.style.inset = "0";
+                runtimeCanvas.style.width = "100%";
+                runtimeCanvas.style.height = "100%";
+                runtimeCanvas.style.pointerEvents = "none";
+                document.body.appendChild(runtimeCanvas);
+              }
+              var w =
+                (hostState.viewport && hostState.viewport.width) ||
+                window.innerWidth;
+              var h =
+                (hostState.viewport && hostState.viewport.height) ||
+                window.innerHeight;
+              if (runtimeCanvas.width !== w) runtimeCanvas.width = w;
+              if (runtimeCanvas.height !== h) runtimeCanvas.height = h;
+              return runtimeCanvas;
+            },
+            media: function () {
+              return hostState.media || [];
+            },
+            raf: function (fn) {
+              var id = requestAnimationFrame(function (t) {
+                runtimeRafs = runtimeRafs.filter(function (x) {
+                  return x !== id;
+                });
+                fn(t);
+              });
+              runtimeRafs.push(id);
+              return id;
+            },
+            timeout: function (fn, ms) {
+              var id = setTimeout(function () {
+                runtimeTimeouts = runtimeTimeouts.filter(function (x) {
+                  return x !== id;
+                });
+                fn();
+              }, ms);
+              runtimeTimeouts.push(id);
+              return id;
+            },
+            onCleanup: function (fn) {
+              runtimeCleanups.push(fn);
+            },
+            css: function (text) {
+              postParent({
+                type: "monacle-host-call",
+                method: "css",
+                args: [text],
+              });
+            },
+          };
+        }
+
+        function runPatchCode(id, code, context) {
+          var settled = false;
+          var postMessageShim = function (msg) {
+            if (settled) return;
+            if (!msg || typeof msg !== "object") return;
+            if (msg.type === "monacle-patch") {
+              settled = true;
+              reply(id, { patch: msg.patch || null });
+            }
+          };
+
+          try {
+            var fn = new Function(
+              "snapshot",
+              "postMessage",
+              '"use strict";\n' + code,
+            );
+            fn(context, postMessageShim);
+
+            if (!settled) {
+              setTimeout(function () {
+                if (!settled) {
+                  settled = true;
+                  reply(id, {
+                    error:
+                      "Sandbox JS did not postMessage({ type: 'monacle-patch', patch })",
+                  });
+                }
+              }, 50);
+            }
+          } catch (err) {
+            settled = true;
+            reply(id, {
+              error: err && err.message ? err.message : String(err),
+            });
+          }
+        }
+
+        function runLiveRuntime(code) {
+          stopRuntimeLocal();
+          try {
+            var run = new Function(
+              "monacle",
+              "chrome",
+              "browser",
+              '"use strict";\n' + code,
+            );
+            run(buildMonacle(), undefined, undefined);
+          } catch (err) {
+            postParent({
+              type: "monacle-runtime-error",
+              message: err && err.message ? err.message : String(err),
+            });
+          }
+        }
+
+        window.addEventListener("message", function (event) {
+          var data = event.data;
+          if (!data || data.source !== "monacle-host") return;
+
+          if (data.type === "monacle-run") {
+            runPatchCode(data.id, data.code, data.context);
+            return;
+          }
+
+          if (data.type === "monacle-host-state") {
+            hostState.media = data.media || [];
+            hostState.viewport = data.viewport || hostState.viewport;
+            hostState.queries = data.queries || hostState.queries;
+            return;
+          }
+
+          if (data.type === "monacle-runtime-stop") {
+            stopRuntimeLocal();
+            return;
+          }
+
+          if (data.type === "monacle-runtime-start") {
+            if (data.token) runtimeToken = data.token;
+            runLiveRuntime(data.code || "");
+          }
+        });
+
+        parent.postMessage(
+          { source: "monacle-sandbox", type: "monacle-ready" },
+          "*",
+        );
+      })();
+    </script>
+  </body>
+</html>

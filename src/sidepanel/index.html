@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Monacle</title>
+    <link rel="stylesheet" href="./sidepanel.css" />
+  </head>
+  <body>
+    <div id="app">
+      <details id="history" class="history">
+        <summary class="history-summary">
+          <span class="history-summary-left">
+            <span class="history-chevron" aria-hidden="true"></span>
+            <span class="history-label">History</span>
+            <span id="history-count" class="history-count">0</span>
+          </span>
+          <button type="button" id="new-btn" class="ghost history-new" title="New chat">
+            New
+          </button>
+        </summary>
+        <div id="history-list" class="history-list" role="list"></div>
+      </details>
+      <main id="transcript" aria-live="polite"></main>
+      <div id="log-host"></div>
+      <footer id="composer">
+        <div class="composer-row">
+          <button type="button" id="reset-btn" class="ghost" title="Reset page">
+            Reset
+          </button>
+          <button type="button" id="logs-btn" class="ghost" title="Companion logs">
+            Logs
+          </button>
+          <button type="button" id="settings-btn" class="ghost" title="Settings">
+            Settings
+          </button>
+        </div>
+        <div class="composer-well">
+          <div id="attach-host" class="attach-host"></div>
+          <textarea
+            id="prompt"
+            rows="1"
+            placeholder="Restyle this page…"
+            autocomplete="off"
+            spellcheck="false"
+          ></textarea>
+          <div class="composer-toolbar">
+            <div id="conn-host" class="conn-host"></div>
+            <button type="button" id="send-btn" class="ghost send" title="Send">
+              ↑
+            </button>
+          </div>
+        </div>
+      </footer>
+    </div>
+    <iframe
+      id="sandbox-frame"
+      src="../sandbox/sandbox.html"
+      sandbox="allow-scripts"
+      hidden
+    ></iframe>
+    <script type="module" src="./sidepanel.ts"></script>
+  </body>
+</html>
