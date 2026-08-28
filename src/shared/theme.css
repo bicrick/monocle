@@ -1,0 +1,61 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7f5;
+  --well: #ffffff;
+  --user-well: #f0f0ee;
+  --text: #1a1a1a;
+  --muted: #6b6b6b;
+  --border: #e6e6e4;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --trace-dim: #9a9a9a;
+  --trace-lit: #1a1a1a;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  background-color: currentColor;
+  -webkit-mask: url("../icons/monocle.svg") center / contain no-repeat;
+  mask: url("../icons/monocle.svg") center / contain no-repeat;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1a1a1a;
+  --well: #222222;
+  --user-well: #222222;
+  --text: #e8e8e8;
+  --muted: #8b8b8b;
+  --border: rgba(255, 255, 255, 0.1);
+  --shadow: none;
+  --trace-dim: #6a6a6a;
+  --trace-lit: #ececec;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #1a1a1a;
+    --well: #222222;
+    --user-well: #222222;
+    --text: #e8e8e8;
+    --muted: #8b8b8b;
+    --border: rgba(255, 255, 255, 0.1);
+    --shadow: none;
+    --trace-dim: #6a6a6a;
+    --trace-lit: #ececec;
+  }
+}

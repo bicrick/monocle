@@ -1,5 +1,8 @@
-import type { ProviderKind, RuntimeMessage, Settings } from "../shared/types";
+import type { ProviderKind, RuntimeMessage, Settings, ThemeKind } from "../shared/types";
 import { BASE_URL_DEFAULTS, MODEL_DEFAULTS } from "../shared/types";
+import { applyTheme, startTheme } from "../shared/theme";
+
+startTheme();
 
 const providerEl = document.getElementById("provider") as HTMLSelectElement;
 const modelEl = document.getElementById("model") as HTMLInputElement;
@@ -13,6 +16,7 @@ const companionStatus = document.getElementById(
   "companion-status",
 ) as HTMLElement;
 const companionLog = document.getElementById("companion-log") as HTMLElement;
+const themeEl = document.getElementById("theme") as HTMLSelectElement;
 
 function isCli(provider: string): boolean {
   return provider === "cursor-cli";
@@ -66,6 +70,8 @@ function fill(settings: Settings): void {
   modelEl.value = settings.model;
   apiKeyEl.value = settings.apiKey;
   baseUrlEl.value = settings.baseUrl || BASE_URL_DEFAULTS[settings.provider];
+  themeEl.value = settings.theme || "system";
+  applyTheme(themeEl.value as ThemeKind);
   syncProviderUi();
 }
 
@@ -87,12 +93,17 @@ baseUrlEl.addEventListener("change", () => {
   if (isCli(providerEl.value)) void pingCompanion();
 });
 
+themeEl.addEventListener("change", () => {
+  applyTheme(themeEl.value as ThemeKind);
+});
+
 saveBtn.addEventListener("click", async () => {
   const settings: Settings = {
     provider: providerEl.value as ProviderKind,
     model: modelEl.value.trim(),
     apiKey: apiKeyEl.value.trim(),
     baseUrl: baseUrlEl.value.trim(),
+    theme: themeEl.value as ThemeKind,
   };
   await chrome.runtime.sendMessage({
     type: "SAVE_SETTINGS",

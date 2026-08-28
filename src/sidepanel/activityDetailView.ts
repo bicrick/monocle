@@ -5,6 +5,8 @@ import {
 
 const MAX_FIELD_CHARS = 20_000;
 
+const EDIT_KEYS = new Set(["css", "overlayHtml", "runtime", "ops", "edit"]);
+
 export function renderActivityDetail(host: HTMLElement, raw: string): void {
   const parsed = parseActivityDetail(raw);
   host.replaceChildren();
@@ -15,6 +17,13 @@ export function renderActivityDetail(host: HTMLElement, raw: string): void {
   }
 
   host.classList.add("activity-detail");
+
+  if (parsed.thinking) {
+    const thought = document.createElement("p");
+    thought.className = "activity-detail-thinking";
+    thought.textContent = parsed.thinking;
+    host.append(thought);
+  }
 
   if (parsed.steps.length) {
     const list = document.createElement("ul");
@@ -34,14 +43,6 @@ export function renderActivityDetail(host: HTMLElement, raw: string): void {
 }
 
 function renderField(field: ActivityField): HTMLElement {
-  const block = document.createElement("section");
-  block.className = "activity-detail-block";
-  block.dataset.field = field.key;
-
-  const label = document.createElement("div");
-  label.className = "activity-detail-label";
-  label.textContent = field.label;
-
   const code = document.createElement("pre");
   code.className = `activity-detail-code is-${field.lang}`;
   const value =
@@ -49,6 +50,25 @@ function renderField(field: ActivityField): HTMLElement {
       ? `${field.value.slice(0, MAX_FIELD_CHARS)}\n…`
       : field.value;
   code.textContent = value;
+
+  if (EDIT_KEYS.has(field.key)) {
+    const wrap = document.createElement("details");
+    wrap.className = "activity-detail-edit";
+    const summary = document.createElement("summary");
+    summary.className = "activity-detail-edit-summary";
+    summary.textContent =
+      field.key === "runtime" ? "Editing scene" : field.label;
+    wrap.append(summary, code);
+    return wrap;
+  }
+
+  const block = document.createElement("section");
+  block.className = "activity-detail-block";
+  block.dataset.field = field.key;
+
+  const label = document.createElement("div");
+  label.className = "activity-detail-label";
+  label.textContent = field.label;
 
   block.append(label, code);
   return block;

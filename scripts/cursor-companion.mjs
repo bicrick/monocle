@@ -92,6 +92,39 @@ function chatWorkspace(sessionId) {
   return dir;
 }
 
+/** @type {Map<string, import("node:child_process").ChildProcess>} */
+const liveChildren = new Map();
+
+function registerChild(sessionId, child) {
+  liveChildren.set(sessionId, child);
+  const clear = () => {
+    if (liveChildren.get(sessionId) === child) liveChildren.delete(sessionId);
+  };
+  child.on("close", clear);
+  child.on("error", clear);
+}
+
+function stopAgent(sessionId) {
+  const child = liveChildren.get(sessionId);
+  if (!child) return false;
+  writeLog("cli stop requested — SIGTERM", { session: sessionId });
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    return false;
+  }
+  setTimeout(() => {
+    if (liveChildren.get(sessionId) === child && child.exitCode == null) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  }, 1500);
+  return true;
+}
+
 function runAgent(prompt, model, sessionId, opts = {}) {
   const agent = resolveAgent();
   const resumeId =
@@ -118,6 +151,7 @@ function runAgent(prompt, model, sessionId, opts = {}) {
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    registerChild(sessionId, child);
 
     writeLog(
       `cli spawn ${agent}${resumeId ? ` --resume ${resumeId}` : ""} timeout=${AGENT_TIMEOUT_MS}ms`,
@@ -377,9 +411,34 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (
+    (req.method === "POST" || req.method === "GET") &&
+    url.pathname === "/stop"
+  ) {
+    let body = {};
+    if (req.method === "POST") {
+      try {
+        body = await readBody(req);
+      } catch {
+        body = {};
+      }
+    }
+    const sessionId =
+      body.sessionId || body.session || url.searchParams.get("session");
+    if (!sessionId) {
+      json(res, 400, { error: "Missing sessionId" });
+      return;
+    }
+    const killed = stopAgent(String(sessionId));
+    writeLog(`stop ${sessionId} killed=${killed}`, { session: sessionId });
+    json(res, 200, { ok: true, stopped: killed, sessionId });
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/restyle") {
     let imageDir = null;
     let session = null;
+    let completed = false;
     try {
       const body = await readBody(req);
       if (!body.prompt && !(body.images && body.images.length)) {
@@ -393,6 +452,9 @@ const server = http.createServer(async (req, res) => {
         model: body.model,
         source: body.source,
         prompt: body.prompt,
+      });
+      req.on("close", () => {
+        if (!completed && session) stopAgent(session.id);
       });
       writeLog(
         `Restyle: ${JSON.stringify(String(body.prompt || "").slice(0, 80))}`,
@@ -443,6 +505,7 @@ const server = http.createServer(async (req, res) => {
         logPath: logPath(),
       });
     } finally {
+      completed = true;
       if (session) endRun(session.id);
       if (imageDir) {
         try {

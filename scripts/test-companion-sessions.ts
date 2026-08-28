@@ -42,12 +42,15 @@ const manualSnap = snapshot("sess_manual");
 assert.equal(manualSnap.running, true);
 assert.equal(manualSnap.source, "sidepanel");
 assert.ok(manualSnap.lines.some((l: string) => l.includes("Writing restyle")));
-assert.ok(manualSnap.lines.some((l: string) => l.includes("body{color:red}")));
+assert.ok(!manualSnap.lines.some((l: string) => l.includes("body{color:red}")));
+assert.equal(manualSnap.hasPayload, true);
+assert.ok(String(manualSnap.payload).includes("body{color:red}"));
 assert.ok(!manualSnap.lines.some((l: string) => l.includes("Read snapshot")));
 
 const loopSnap = snapshot("sess_loop");
 assert.ok(loopSnap.lines.some((l: string) => l.includes("Read snapshot")));
 assert.ok(loopSnap.lines.some((l: string) => l.includes("coral")));
+assert.equal(loopSnap.thinking, "coral and fish");
 assert.ok(!loopSnap.lines.some((l: string) => l.includes("Writing restyle")));
 
 const all = snapshot();

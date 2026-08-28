@@ -6,6 +6,7 @@
  * commands — never re-execute the stage IIFE (duplicate listeners race).
  */
 
+import { isExtensionContextValid } from "./extensionContext";
 import { reportRuntimeError } from "./runtimeErrors";
 
 const HOST_SOURCE = "monacle-three-host";
@@ -152,6 +153,9 @@ export function ensureThreeStage(): Promise<void> {
   }
 
   if (injecting) return injecting;
+  if (!isExtensionContextValid()) {
+    return Promise.reject(new Error("Extension context invalidated"));
+  }
   injecting = chrome.runtime
     .sendMessage({ type: "INJECT_THREE_STAGE" })
     .then((res) => {

@@ -1,3 +1,8 @@
+import {
+  formatExpandDetail,
+  interpretStatus,
+  type ActivityTalk,
+} from "../shared/activityTalk";
 import type {
   AgentEvent,
   AgentSession,
@@ -39,6 +44,7 @@ export class CursorCliProvider implements AgentProvider {
     history: Array<{ role: "user" | "assistant"; content: string }>,
     pageContext: PageContext,
     images?: PromptImage[],
+    signal?: AbortSignal,
   ): AsyncIterable<AgentEvent> {
     const base = (this.settings.baseUrl || "http://127.0.0.1:8787").replace(
       /\/$/,
@@ -49,6 +55,7 @@ export class CursorCliProvider implements AgentProvider {
       const restyle = fetch(`${base}/restyle`, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        signal,
         body: JSON.stringify({
           // Companion concurrency key = Monacle chat id
           sessionId: session.id,
@@ -76,40 +83,47 @@ export class CursorCliProvider implements AgentProvider {
         finished = true;
       });
 
+      let lastVerb = "Thinking";
       yield {
         type: "progress",
         update: true,
         line: {
-          label: session.cursorSessionId
-            ? "Continuing chat"
-            : "Asking Cursor",
-          detail: "waiting… 1s",
+          label: lastVerb,
+          detail: "waiting…",
           ts: Date.now(),
           state: "active",
         },
       };
 
       while (!finished) {
+        if (signal?.aborted) break;
         const raced = await Promise.race([
           done.then(() => "done" as const),
           sleep(600).then(() => "tick" as const),
         ]);
         if (raced !== "tick") break;
-        const detail = await readCliStatus(base, session.id);
-        if (detail) {
+        const talk = await readCliStatus(base, session.id);
+        if (talk) {
+          const verb = talk.verb || "Thinking";
+          const sameVerb = verb === lastVerb;
+          lastVerb = verb;
           yield {
             type: "progress",
-            update: true,
+            update: sameVerb,
             line: {
-              label: session.cursorSessionId
-                ? "Continuing chat"
-                : "Asking Cursor",
-              detail,
+              label: verb,
+              thinking: talk.thinking || undefined,
+              detail: formatExpandDetail(talk),
               ts: Date.now(),
               state: "active",
             },
           };
         }
+      }
+
+      if (signal?.aborted) {
+        yield { type: "stopped" };
+        return;
       }
 
       const res = await restyle;
@@ -168,6 +182,10 @@ export class CursorCliProvider implements AgentProvider {
 
       yield { type: "done" };
     } catch (err) {
+      if (isAbortError(err) || signal?.aborted) {
+        yield { type: "stopped" };
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       const hint = /fetch|Failed|ECONNREFUSED|NetworkError/i.test(message)
         ? "Start the local stack: npm run dev — then agent login if prompted."
@@ -178,6 +196,13 @@ export class CursorCliProvider implements AgentProvider {
   }
 }
 
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && err.name === "AbortError")
+  );
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -185,26 +210,34 @@ function sleep(ms: number): Promise<void> {
 async function readCliStatus(
   base: string,
   sessionId?: string,
-): Promise<string> {
+): Promise<ActivityTalk | null> {
   try {
     const qs = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
     const res = await fetch(`${base}/status${qs}`);
-    if (!res.ok) return "";
+    if (!res.ok) return null;
     const data = (await res.json()) as {
       running?: boolean;
       summary?: string;
       model?: string | null;
+      thinking?: string;
+      hasPayload?: boolean;
+      payload?: string;
       lines?: string[];
       raw?: string[];
     };
     const steps = data.lines?.length ? data.lines : data.raw ?? [];
-    if (!data.running && !steps.length) return "";
-    const parts: string[] = [];
-    if (data.summary) parts.push(data.summary);
-    const excerpt = steps.slice(-30);
-    if (excerpt.length) parts.push(excerpt.join("\n"));
-    return parts.join("\n");
+    if (!data.running && !steps.length && !data.thinking) return null;
+    return interpretStatus({
+      running: data.running,
+      summary: data.summary,
+      model: data.model,
+      thinking: data.thinking,
+      hasPayload: data.hasPayload,
+      payload: data.payload,
+      lines: steps,
+    });
   } catch {
-    return "";
+    return null;
   }
 }
+

@@ -23,7 +23,12 @@ import {
   shouldTripBreaker,
 } from "../src/sandbox/runtimeGuard";
 import { unsupportedRuntimeReason } from "../src/sandbox/runtimePolicy";
+import { persistablePatch } from "../src/patches/persistPatch";
+import { isTransientHostError } from "../src/content/extensionContext";
 import { errorMessage, isolate, isolateVoid } from "../src/content/isolate";
+import { parseWrapClasses } from "../src/content/wrapOp";
+import { CURSOR_CLI_MODELS, labelForModel } from "../src/shared/models";
+import { resolveTheme } from "../src/shared/theme";
 
 const fromDemo = validatePatch(CINEMA_DEMO_PATCH);
 assert.ok(fromDemo);
@@ -269,12 +274,18 @@ const contentFiles = [
   "src/content/index.ts",
   "src/content/runtimeErrors.ts",
   "src/content/isolate.ts",
+  "src/content/wrapOp.ts",
 ];
 for (const rel of contentFiles) {
   const src = fs.readFileSync(path.join(root, rel), "utf8");
   assert.equal(src.includes("new Function"), false, `${rel} must not eval`);
   assert.equal(/\beval\s*\(/.test(src), false, `${rel} must not eval`);
 }
+assert.ok(
+  fs
+    .readFileSync(path.join(root, "src/content/index.ts"), "utf8")
+    .includes("swallowInvalidatedErrors"),
+);
 assert.ok(runtimeSrc.includes("startSandboxRuntime"));
 assert.ok(runtimeSrc.includes("applyLiveStyle") || runtimeSrc.includes("style: applyLiveStyle"));
 assert.ok(runtimeSrc.includes("maskPollId"));
@@ -289,6 +300,17 @@ assert.ok(
     sandboxFrameSrc.includes("stopSandboxSession"),
   "sandboxFrame must reuse the iframe across restyles (avoid GPU crash thrash)",
 );
+assert.ok(
+  sandboxFrameSrc.includes("srcdoc") &&
+    sandboxFrameSrc.includes('sandbox", "allow-scripts'),
+  "runtime iframe must be same-tab srcdoc, not an extension sandbox page",
+);
+assert.equal(
+  /frame\.src\s*=\s*sandboxUrl/.test(sandboxFrameSrc),
+  false,
+  "must not assign chrome-extension sandbox.html to iframe.src",
+);
+assert.ok(sandboxFrameSrc.includes("prewarmSandboxFrame"));
 assert.equal(
   sandboxFrameSrc.includes("transferControlToOffscreen"),
   false,
@@ -341,13 +363,58 @@ const typesSrc = fs.readFileSync(path.join(root, "src/shared/types.ts"), "utf8")
 assert.ok(typesSrc.includes("RUNTIME_ERROR"));
 assert.ok(typesSrc.includes("opErrors"));
 assert.ok(typesSrc.includes("lastRuntimeError"));
+assert.ok(typesSrc.includes("lastPatch"));
+assert.ok(typesSrc.includes("CONTENT_READY"));
+assert.ok(typesSrc.includes("PING"));
+assert.deepEqual(parseWrapClasses("scroll-parchment monacle-scroll-wrap"), [
+  "scroll-parchment",
+  "monacle-scroll-wrap",
+]);
+assert.deepEqual(parseWrapClasses("  "), []);
+const wrapOpSrc = fs.readFileSync(path.join(root, "src/content/wrapOp.ts"), "utf8");
+assert.ok(wrapOpSrc.includes("WRAP_INPLACE_KIND"));
+assert.ok(wrapOpSrc.includes("INSERT_MARK"));
+assert.ok(applicatorSrc.includes("applyWrap"));
+assert.ok(applicatorSrc.includes("revertWrap"));
+assert.equal(
+  isTransientHostError("Uncaught Error: Extension context invalidated."),
+  true,
+);
+assert.equal(isTransientHostError("HMRPort is not initialized"), true);
+assert.equal(isTransientHostError("Scene runtime failed"), false);
+const kept = persistablePatch({
+  css: "body{color:red}",
+  overlayHtml: "<div></div>",
+  runtime: "monacle.raf(()=>{})",
+});
+assert.equal(kept.css, "body{color:red}");
+assert.ok(kept.runtime);
+const trimmed = persistablePatch(
+  { css: "x", runtime: "y".repeat(200) },
+  20,
+);
+assert.equal(trimmed.css, "x");
+assert.equal(trimmed.runtime, undefined);
 const bgSrc = fs.readFileSync(
   path.join(root, "src/background/index.ts"),
   "utf8",
 );
 assert.ok(bgSrc.includes("maybeStartRepair"));
 assert.ok(bgSrc.includes("RUNTIME_ERROR"));
+assert.ok(bgSrc.includes("CONTENT_READY"));
+assert.ok(bgSrc.includes("setLastPatch"));
+assert.ok(bgSrc.includes("reinjectSessionTabs"));
+assert.ok(bgSrc.includes("ensureContentScript"));
+assert.ok(bgSrc.includes("enqueueApply"));
+assert.ok(bgSrc.includes("runtimeLive"));
 assert.ok(bgSrc.includes("unhandledrejection"));
+const bridgeSrc = fs.readFileSync(
+  path.join(root, "src/background/contentBridge.ts"),
+  "utf8",
+);
+assert.ok(bridgeSrc.includes("pingTab"));
+assert.ok(bridgeSrc.includes("ensureContentScript"));
+assert.ok(bridgeSrc.includes("isRestrictedUrl"));
 assert.ok(!bgSrc.includes("fewer particles"));
 assert.equal(isolate(() => { throw new Error("boom"); }, 0).error, "boom");
 assert.equal(isolate(() => 7, 0).value, 7);
@@ -432,5 +499,20 @@ assert.ok(preservePlugin.includes("CRXJS DEV MODE"));
 assert.ok(preservePlugin.includes("monacle-runtime-start"));
 const manifestSrc = fs.readFileSync(path.join(root, "manifest.config.ts"), "utf8");
 assert.ok(manifestSrc.includes("threeStage.js"));
+
+assert.deepEqual(
+  CURSOR_CLI_MODELS.map((m) => m.id),
+  ["auto", "composer", "sonnet", "gpt", "grok"],
+);
+assert.equal(labelForModel("auto"), "Auto");
+assert.equal(labelForModel("sonnet"), "Sonnet");
+assert.equal(labelForModel("custom-id"), "custom-id");
+assert.equal(labelForModel(""), "Auto");
+
+assert.equal(resolveTheme("light"), "light");
+assert.equal(resolveTheme("dark"), "dark");
+assert.equal(resolveTheme("system"), "system");
+assert.equal(resolveTheme(undefined), "system");
+assert.equal(resolveTheme("nope"), "system");
 
 console.log("schema tests passed");

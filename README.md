@@ -1,4 +1,4 @@
-# Monacle
+# Monocle
 
 Chrome extension that restyles the **currently open tab**. Site JS and media keep running. The default brain is **your local Cursor CLI** via a companion on this machine. Persistent remote machines later use the same `/restyle` contract.
 
@@ -15,7 +15,7 @@ agent status
 2. Build and load the extension:
 
 ```bash
-cd /Users/pbrown/Desktop/Monacle
+cd /path/to/monocle
 npm install
 npm run build
 ```
@@ -32,7 +32,7 @@ It listens only on `http://127.0.0.1:8787`. The extension POSTs the page snapsho
 
 4. Extension options → provider **Cursor CLI (this machine)** → Save. Status should say the companion is running.
 
-5. Open a YouTube watch page → Monacle icon → `make this look like a cinema`.
+5. Open a YouTube watch page → Monocle icon → `make this look like a cinema`.
 
 No cloud API key is required for Cursor CLI. Anthropic / OpenAI / xAI remain optional fallbacks.
 

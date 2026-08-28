@@ -17,6 +17,7 @@ import {
   destroyThreeStage,
 } from "./threeHost";
 import { reportRuntimeError } from "./runtimeErrors";
+export const INSERT_MARK = "data-monacle-insert";
 const BATCH_MARK = "data-monacle-batch";
 const SCENE_ID = "monacle-scene";
 const RUNTIME_STYLE_ID = "monacle-runtime-css";
@@ -611,41 +612,43 @@ export function runRuntime(code: string): void {
   const host = document.getElementById(OVERLAY_ID) as HTMLElement | null;
   if (host) startMediaCutoutTracking(host);
 
-  void startSandboxRuntime(code, {
-    query: (selector) => safeQuery(selector).map(serializeEl),
-    insert: (html, opts) =>
-      insertHtml(
-        html,
-        opts.selector,
-        (opts.position as "before" | "after" | "prepend" | "append") ??
-          "append",
-        opts.batchId,
-      ).map(serializeEl),
-    create: (html, opts) =>
-      createHtml(html, {
-        selector: opts?.selector,
-        position: opts?.position as
-          | "before"
-          | "after"
-          | "prepend"
-          | "append"
-          | undefined,
-        batchId: opts?.batchId,
-      }).map(serializeEl),
-    css: (text) => api.css(text),
-    style: applyLiveStyle,
-    three: buildThreeApi(),
-    media: collectMedia,
-    viewport: () => ({
-      width: window.innerWidth,
-      height: window.innerHeight,
-    }),
-  }).catch((err) => {
-    reportRuntimeError(
-      err instanceof Error ? err.message : String(err),
-      true,
-    );
-  });
+  // Defer so CSS/ops commit first. A sandbox mount failure must not
+  // unwind the static scene or trip a fatal repair loop.
+  window.setTimeout(() => {
+    void startSandboxRuntime(code, {
+      query: (selector) => safeQuery(selector).map(serializeEl),
+      insert: (html, opts) =>
+        insertHtml(
+          html,
+          opts.selector,
+          (opts.position as "before" | "after" | "prepend" | "append") ??
+            "append",
+          opts.batchId,
+        ).map(serializeEl),
+      create: (html, opts) =>
+        createHtml(html, {
+          selector: opts?.selector,
+          position: opts?.position as
+            | "before"
+            | "after"
+            | "prepend"
+            | "append"
+            | undefined,
+          batchId: opts?.batchId,
+        }).map(serializeEl),
+      css: (text) => api.css(text),
+      style: applyLiveStyle,
+      three: buildThreeApi(),
+      media: collectMedia,
+      viewport: () => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      }),
+    }).catch((err) => {
+      reportRuntimeError(
+        err instanceof Error ? err.message : String(err),
+        false,
+      );
+    });
+  }, 0);
 }
-
-export { INSERT_MARK };

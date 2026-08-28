@@ -1,5 +1,5 @@
 /**
- * Live smoke: options/sidepanel UI + autoGrow + CLI pill + history + content script.
+ * Live smoke: options/sidepanel UI + autoGrow + model picker + history + content script.
  */
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -102,21 +102,24 @@ async function main() {
     assert.ok(await panel.$("#history-count"));
     assert.ok(await panel.$("#conn-host"));
 
-    await panel.waitForSelector(".conn-chip", { timeout: 5000 });
+    await panel.waitForSelector(".model-picker-trigger", { timeout: 5000 });
     await new Promise((r) => setTimeout(r, 1500));
-    const chip = await panel.evaluate(() => {
-      const el = document.querySelector(".conn-chip");
+    const picker = await panel.evaluate(() => {
+      const el = document.querySelector(".model-picker-trigger");
+      const label = el?.querySelector(".model-picker-label");
       return {
         present: !!el,
         online: el?.classList.contains("is-online") ?? false,
         offline: el?.classList.contains("is-offline") ?? false,
         title: el?.getAttribute("title") || "",
-        label: el?.textContent?.trim() || "",
+        label: label?.textContent?.trim() || "",
+        hasMenu: !!document.querySelector(".model-picker-menu"),
       };
     });
-    results.cliChip = chip;
-    assert.equal(chip.present, true);
-    assert.match(chip.label, /CLI/i);
+    results.modelPicker = picker;
+    assert.equal(picker.present, true);
+    assert.equal(picker.hasMenu, true);
+    assert.match(picker.label, /Auto|Composer|Sonnet|GPT|Grok/i);
 
     const history = await panel.evaluate(() => {
       const details = document.getElementById("history");

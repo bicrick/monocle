@@ -2,8 +2,10 @@ import type {
   ActivityLine,
   ChatMessage,
   ChatSession,
+  Patch,
   SessionSummary,
 } from "../shared/types";
+import { persistablePatch } from "../patches/persistPatch";
 
 const STORAGE_KEY = "chatSessions";
 const MAX_SESSIONS = 50;
@@ -185,6 +187,17 @@ export async function setLastRuntimeError(
   if (!session) return;
   if (error && error.trim()) session.lastRuntimeError = error.trim();
   else delete session.lastRuntimeError;
+  await saveSession(session);
+}
+
+export async function setLastPatch(
+  sessionId: string,
+  patch: Patch | undefined,
+): Promise<void> {
+  const session = await getSession(sessionId);
+  if (!session) return;
+  if (!patch) delete session.lastPatch;
+  else session.lastPatch = persistablePatch(patch);
   await saveSession(session);
 }
 

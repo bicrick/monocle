@@ -1,5 +1,6 @@
 import type { Settings } from "../shared/types";
 import { BASE_URL_DEFAULTS, DEFAULT_SETTINGS, MODEL_DEFAULTS } from "../shared/types";
+import { resolveTheme } from "../shared/theme";
 import { SYSTEM_PROMPT } from "./systemPrompt";
 import type { AgentProvider } from "./types";
 import { CursorCliProvider } from "./cursorCli";
@@ -14,6 +15,7 @@ export async function loadSettings(): Promise<Settings> {
     apiKey: raw.apiKey ?? "",
     model: raw.model || MODEL_DEFAULTS[provider],
     baseUrl: raw.baseUrl || BASE_URL_DEFAULTS[provider],
+    theme: resolveTheme(raw.theme ?? DEFAULT_SETTINGS.theme),
   };
 }
 

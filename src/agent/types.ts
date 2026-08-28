@@ -14,5 +14,6 @@ export interface AgentProvider {
     history: Array<{ role: "user" | "assistant"; content: string }>,
     pageContext: PageContext,
     images?: PromptImage[],
+    signal?: AbortSignal,
   ): AsyncIterable<AgentEvent>;
 }

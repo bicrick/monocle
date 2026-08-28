@@ -1,23 +1,4 @@
-:root {
-  color-scheme: light dark;
-  --bg: #f7f7f5;
-  --well: #ffffff;
-  --text: #1a1a1a;
-  --muted: #6b6b6b;
-  --border: #e6e6e4;
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
-    sans-serif;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1a1a1a;
-    --well: #222222;
-    --text: #e8e8e8;
-    --muted: #8b8b8b;
-    --border: rgba(255, 255, 255, 0.1);
-  }
-}
+@import "../shared/theme.css";
 
 * {
   box-sizing: border-box;

@@ -12,8 +12,12 @@ import {
   collectPasteImages,
   createAttachmentTray,
 } from "./attachments";
+import { createChatMessage } from "./chatMessage";
 import { createLogDrawer } from "./logDrawer";
-import { createStatusChip } from "./statusChip";
+import { createModelPicker } from "./modelPicker";
+import { startTheme } from "../shared/theme";
+
+startTheme();
 
 const transcript = document.getElementById("transcript") as HTMLElement;
 const promptEl = document.getElementById("prompt") as HTMLTextAreaElement;
@@ -55,7 +59,7 @@ let draftAssistant: HTMLElement | null = null;
 const activity = createActivityBlock();
 const attachments = createAttachmentTray(attachHost);
 const logs = createLogDrawer(logHost);
-const connChip = createStatusChip(connHost, () => logs.toggle());
+const modelPicker = createModelPicker(connHost);
 
 const sandboxPending = new Map<
   number,
@@ -65,16 +69,17 @@ let sandboxSeq = 0;
 
 function setBusy(next: boolean): void {
   busy = next;
-  sendBtn.disabled = next;
-  promptEl.disabled = next;
+  sendBtn.disabled = false;
+  sendBtn.classList.toggle("is-stop", next);
+  sendBtn.title = next ? "Stop" : "Send";
+  sendBtn.setAttribute("aria-label", next ? "Stop" : "Send");
+  promptEl.disabled = false;
   activity.setBusy(next);
   logs.setBusy(next);
 }
 
 function appendMessage(msg: ChatMessage): HTMLElement {
-  const el = document.createElement("div");
-  el.className = `msg ${msg.role}`;
-  el.textContent = msg.content;
+  const el = createChatMessage(msg);
   transcript.appendChild(el);
   scrollTranscriptToBottom(true);
   return el;
@@ -235,12 +240,13 @@ function applyTabState(res: RuntimeMessage): void {
   if (res.type !== "TAB_STATE") return;
   sessionId = res.sessionId;
   renderMessages(res.messages);
+  setBusy(res.busy);
   if (res.activity?.length) {
     ensureThoughtUnderChat();
     activity.setLines(res.activity);
+  } else if (res.busy) {
+    ensureThoughtUnderChat();
   }
-  setBusy(res.busy);
-  if (res.busy) ensureThoughtUnderChat();
   renderHistory(res.sessions ?? [], res.sessionId);
 }
 
@@ -292,14 +298,19 @@ async function sendPrompt(): Promise<void> {
     return;
   }
 
-  const display =
-    text ||
-    (pending.length
-      ? `(${pending.length} image${pending.length > 1 ? "s" : ""})`
-      : "");
+  const images: PromptImage[] = pending.map((p) => ({
+    name: p.name,
+    mimeType: p.mimeType,
+    dataBase64: p.dataBase64,
+  }));
   promptEl.value = "";
   autoGrow();
-  appendMessage({ role: "user", content: display, ts: Date.now() });
+  appendMessage({
+    role: "user",
+    content: text,
+    ts: Date.now(),
+    images: images.length ? images : undefined,
+  });
   draftAssistant = null;
   activity.clear();
   ensureThoughtUnderChat();
@@ -309,12 +320,6 @@ async function sendPrompt(): Promise<void> {
     ts: Date.now(),
     state: "active",
   });
-
-  const images: PromptImage[] = pending.map((p) => ({
-    name: p.name,
-    mimeType: p.mimeType,
-    dataBase64: p.dataBase64,
-  }));
   attachments.clear();
 
   await chrome.runtime.sendMessage({
@@ -323,6 +328,17 @@ async function sendPrompt(): Promise<void> {
     prompt: text || "Restyle based on the attached image(s).",
     sessionId: sessionId ?? undefined,
     images: images.length ? images : undefined,
+  } satisfies RuntimeMessage);
+}
+
+async function stopPrompt(): Promise<void> {
+  if (!busy) return;
+  tabId = tabId ?? (await resolveTabId());
+  if (tabId == null) return;
+  await chrome.runtime.sendMessage({
+    type: "STOP_PROMPT",
+    tabId,
+    sessionId: sessionId ?? undefined,
   } satisfies RuntimeMessage);
 }
 
@@ -420,7 +436,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       ensureThoughtUnderChat();
       if (event.update) activity.updateLast(event.line);
       else activity.push(event.line);
-      activity.setBusy(event.line.state === "active");
     } else if (event.type === "text") {
       if (event.text) appendAssistantDelta(event.text);
     } else if (event.type === "error") {
@@ -436,6 +451,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         content: event.message,
         ts: Date.now(),
       });
+    } else if (event.type === "stopped") {
+      ensureThoughtUnderChat();
     } else if (event.type === "done") {
       setBusy(false);
       draftAssistant = null;
@@ -459,6 +476,7 @@ window.addEventListener("resize", autoGrow);
 promptEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
+    if (busy) return;
     void sendPrompt();
   }
 });
@@ -476,9 +494,15 @@ promptEl.addEventListener("paste", (e) => {
   })();
 });
 autoGrow();
-sendBtn.addEventListener("click", () => void sendPrompt());
+sendBtn.addEventListener("click", () => {
+  if (busy) void stopPrompt();
+  else void sendPrompt();
+});
 resetBtn.addEventListener("click", () => void resetPage());
-logsBtn.addEventListener("click", () => logs.toggle());
+logsBtn.addEventListener("click", () => {
+  logs.toggle();
+  logsBtn.setAttribute("aria-expanded", logs.isOpen() ? "true" : "false");
+});
 settingsBtn.addEventListener("click", () => {
   void chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" });
 });
@@ -490,7 +514,7 @@ newBtn.addEventListener("click", (e) => {
 
 const companionBase = "http://127.0.0.1:8787";
 logs.start(companionBase);
-connChip.start(companionBase);
+modelPicker.start(companionBase);
 void refreshState();
 chrome.tabs.onActivated.addListener(() => void refreshState());
 chrome.tabs.onUpdated.addListener((id, info) => {

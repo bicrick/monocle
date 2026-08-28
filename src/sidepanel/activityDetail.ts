@@ -1,5 +1,7 @@
 /** Parse streamed Cursor / patch dumps into labeled, readable sections. */
 
+import { isPayloadText, matchThinkingLine } from "../shared/activityTalk";
+
 const FIELD_META: Record<string, { label: string; lang: FieldLang }> = {
   css: { label: "CSS", lang: "css" },
   overlayHtml: { label: "Overlay HTML", lang: "html" },
@@ -22,6 +24,7 @@ export interface ActivityField {
 
 export interface ParsedActivityDetail {
   steps: string[];
+  thinking: string | null;
   fields: ActivityField[];
   /** Used when nothing structured could be recovered. */
   fallback: string | null;
@@ -29,28 +32,37 @@ export interface ParsedActivityDetail {
 
 export function parseActivityDetail(raw: string): ParsedActivityDetail {
   const text = (raw || "").replace(/\r\n/g, "\n").trim();
-  if (!text) return { steps: [], fields: [], fallback: null };
+  if (!text) return { steps: [], thinking: null, fields: [], fallback: null };
 
-  const { steps, rest } = splitSteps(text);
+  const { steps, rest, thinking } = splitSteps(text);
   const fields = rest ? extractFields(rest) : [];
 
-  if (!fields.length && !steps.length) {
-    return { steps: [], fields: [], fallback: text };
+  if (!fields.length && !steps.length && !thinking) {
+    return { steps: [], thinking: null, fields: [], fallback: text };
   }
-  if (!fields.length && steps.join("\n") === text) {
-    return { steps, fields: [], fallback: null };
+  if (!fields.length && !thinking && steps.join("\n") === text) {
+    return { steps, thinking: null, fields: [], fallback: null };
   }
   if (!fields.length && rest) {
-    if (steps.length) {
+    if (steps.length || thinking) {
+      const obscured = isPayloadText(rest);
       return {
         steps,
-        fields: [{ key: "output", label: "Output", lang: "text", value: rest }],
+        thinking,
+        fields: [
+          {
+            key: obscured ? "edit" : "output",
+            label: obscured ? "Writing restyle" : "Output",
+            lang: "text",
+            value: rest,
+          },
+        ],
         fallback: null,
       };
     }
-    return { steps: [], fields: [], fallback: text };
+    return { steps: [], thinking: null, fields: [], fallback: text };
   }
-  return { steps, fields, fallback: null };
+  return { steps, thinking, fields, fallback: null };
 }
 
 export function formatCss(input: string): string {
@@ -148,21 +160,33 @@ export function formatHtml(input: string): string {
   return lines.join("\n");
 }
 
-function splitSteps(text: string): { steps: string[]; rest: string } {
+function splitSteps(text: string): {
+  steps: string[];
+  rest: string;
+  thinking: string | null;
+} {
   const steps: string[] = [];
   const rest: string[] = [];
+  let thinking: string | null = null;
   let sawPayload = false;
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    if (!sawPayload && isStepLine(trimmed)) {
-      steps.push(trimmed);
-      continue;
+    if (!sawPayload) {
+      const thought = matchThinkingLine(trimmed);
+      if (thought) {
+        thinking = thought;
+        continue;
+      }
+      if (isStepLine(trimmed)) {
+        steps.push(trimmed);
+        continue;
+      }
     }
     sawPayload = true;
     rest.push(line);
   }
-  return { steps, rest: rest.join("\n").trim() };
+  return { steps, rest: rest.join("\n").trim(), thinking };
 }
 
 function isStepLine(line: string): boolean {

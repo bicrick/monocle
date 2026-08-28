@@ -1,0 +1,57 @@
+/* React Bits Shiny Text (CSS variant), vendored.
+   https://reactbits.dev/text-animations/shiny-text
+   https://github.com/DavidHDev/react-bits/blob/main/src/ts-default/TextAnimations/ShinyText/ShinyText.css
+
+   120deg sheen, --trace-dim / --trace-lit. Motion differs from upstream:
+   400% X size so the 40–60% lit stop sits outside the glyphs at both
+   ends; 120% → -20% then hold so the 100%→0% wrap is dim-to-dim.
+*/
+
+.shiny-text {
+  display: inline-block;
+  max-width: 100%;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-color: var(--trace-dim);
+  background-image: linear-gradient(
+    120deg,
+    var(--trace-dim) 40%,
+    var(--trace-lit) 50%,
+    var(--trace-dim) 60%
+  );
+  background-size: 400% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: shine 5.5s linear infinite;
+}
+
+@keyframes shine {
+  0% {
+    background-position: 120% 50%;
+  }
+  88% {
+    background-position: -20% 50%;
+  }
+  100% {
+    background-position: -20% 50%;
+  }
+}
+
+.shiny-text.disabled {
+  animation: none;
+  color: var(--trace-dim);
+  -webkit-text-fill-color: var(--trace-dim);
+  background-color: transparent;
+  background-image: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shiny-text {
+    animation: none;
+    color: var(--trace-dim);
+    -webkit-text-fill-color: var(--trace-dim);
+    background-color: transparent;
+    background-image: none;
+  }
+}

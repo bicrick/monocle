@@ -3,12 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Monacle Settings</title>
+    <title>Monocle Settings</title>
+    <link rel="icon" href="../icons/icon32.png" type="image/png" />
     <link rel="stylesheet" href="./options.css" />
   </head>
   <body>
     <main>
-      <h1>Monacle</h1>
+      <h1 class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        Monocle
+      </h1>
       <p class="muted">
         Default: your local Cursor CLI. The extension talks to a companion on this machine. Persistent remote machines later.
       </p>
@@ -43,6 +47,15 @@
       <label>
         Base URL
         <input id="baseUrl" type="url" spellcheck="false" placeholder="optional override" />
+      </label>
+
+      <label>
+        Appearance
+        <select id="theme">
+          <option value="system">Match system</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
       </label>
 
       <div class="row">

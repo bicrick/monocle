@@ -12,6 +12,7 @@ import {
   startMediaCutoutTracking,
   stopRuntime,
 } from "./runtime";
+import { applyWrap, revertWrap } from "./wrapOp";
 
 /** Generic resource cap — oversized inserts can OOM the tab, not just this scene. */
 const MAX_INSERT_HTML = 200_000;
@@ -212,19 +213,15 @@ function applyOp(op: PatchOp): void {
         }
         break;
       case "wrap": {
-        if (el.parentElement?.hasAttribute(MARK)) break;
         if (isProtectedElement(el) && el.querySelector("video, audio")) {
           if (el.matches("video, audio")) break;
         }
-        const wrapper = document.createElement(op.wrapTag || "div");
-        if (op.wrapClass) wrapper.className = op.wrapClass;
-        wrapper.setAttribute(MARK, "wrap");
-        el.parentElement?.insertBefore(wrapper, el);
-        wrapper.appendChild(el);
+        applyWrap(el, MARK, op.wrapTag, op.wrapClass);
         break;
       }
       case "move": {
         if (!op.targetSelector) break;
+        if (!el.hasAttribute(INSERT_MARK)) break;
         const target = document.querySelector(op.targetSelector);
         if (!target) break;
         if (el.matches("video, audio")) break;
@@ -331,12 +328,7 @@ export function resetPatch(): void {
     if (kind === "hide") {
       (el as HTMLElement).style.removeProperty("display");
     }
-    if (kind === "wrap") {
-      const parent = el.parentElement;
-      while (el.firstChild) parent?.insertBefore(el.firstChild, el);
-      el.remove();
-      return;
-    }
+    if (revertWrap(el, MARK)) return;
     el.removeAttribute(MARK);
   });
 

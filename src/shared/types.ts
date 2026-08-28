@@ -2,11 +2,14 @@
 
 export type ProviderKind = "cursor-cli" | "anthropic" | "openai" | "xai";
 
+export type ThemeKind = "system" | "light" | "dark";
+
 export interface Settings {
   provider: ProviderKind;
   apiKey: string;
   model: string;
   baseUrl?: string;
+  theme?: ThemeKind;
 }
 
 export interface Rect {
@@ -98,6 +101,8 @@ export interface PromptImage {
 export interface ActivityLine {
   label: string;
   detail?: string;
+  /** Latest streamed thought — never payload. */
+  thinking?: string;
   ts: number;
   state: "active" | "done" | "pending" | "error";
 }
@@ -109,6 +114,7 @@ export type AgentEvent =
   | { type: "error"; message: string }
   | { type: "progress"; line: ActivityLine; update?: boolean }
   | { type: "cursor_session"; cursorSessionId: string }
+  | { type: "stopped" }
   | { type: "done" };
 
 export type RuntimeMessage =
@@ -153,14 +159,19 @@ export type RuntimeMessage =
   | { type: "SESSIONS"; sessions: SessionSummary[] }
   | { type: "OPEN_SESSION"; tabId: number; sessionId: string }
   | { type: "NEW_SESSION"; tabId: number }
+  | { type: "STOP_PROMPT"; tabId: number; sessionId?: string }
   | { type: "OPEN_OPTIONS" }
   | { type: "RUN_SANDBOX"; code: string; context: PageContext }
-  | { type: "INJECT_THREE_STAGE" };
+  | { type: "INJECT_THREE_STAGE" }
+  | { type: "CONTENT_READY"; hasPatch?: boolean; runtimeLive?: boolean }
+  | { type: "PING" };
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   ts: number;
+  /** Pasted / shipped images — shown as thumbs in the same user bubble. */
+  images?: PromptImage[];
 }
 
 /** Persisted restyle chat — survives panel close and service worker sleep. */
@@ -178,6 +189,8 @@ export interface ChatSession {
   activity: ActivityLine[];
   /** Last sandbox/runtime failure — included on the next restyle turn. */
   lastRuntimeError?: string;
+  /** Last applied scene — restored after HMR, tab refresh, or content-script death. */
+  lastPatch?: Patch;
   /** Cursor CLI chat UUID — successive prompts in this chat use --resume. */
   cursorSessionId?: string;
 }
@@ -197,6 +210,7 @@ export const DEFAULT_SETTINGS: Settings = {
   apiKey: "",
   model: "auto",
   baseUrl: "http://127.0.0.1:8787",
+  theme: "system",
 };
 
 export const MODEL_DEFAULTS: Record<ProviderKind, string> = {

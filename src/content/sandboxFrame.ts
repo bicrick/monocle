@@ -4,6 +4,7 @@
  * Canvas is NOT transferred — motion uses host DOM nodes + style.
  */
 
+import { isExtensionContextValid } from "./extensionContext";
 import { reportRuntimeError } from "./runtimeErrors";
 import {
   FRAME_ID,
@@ -30,9 +31,20 @@ let lastHostStateKey = "";
 let startGeneration = 0;
 let startChain: Promise<void> = Promise.resolve();
 let deadReported = false;
+let sandboxHtmlCache: string | null = null;
+let mountChain: Promise<HTMLIFrameElement | null> = Promise.resolve(null);
 
-function sandboxUrl(): string {
-  return chrome.runtime.getURL("src/sandbox/sandbox.html");
+async function loadSandboxHtml(): Promise<string> {
+  if (sandboxHtmlCache) return sandboxHtmlCache;
+  if (!isExtensionContextValid()) {
+    throw new Error("Extension context invalidated");
+  }
+  const res = await fetch(chrome.runtime.getURL("src/sandbox/sandbox.html"));
+  if (!res.ok) {
+    throw new Error(`Failed to load sandbox html (${res.status})`);
+  }
+  sandboxHtmlCache = await res.text();
+  return sandboxHtmlCache;
 }
 
 function frameEl(): HTMLIFrameElement | null {
@@ -43,7 +55,7 @@ function noteDeadFrame(reason: string): void {
   if (deadReported || !token) return;
   deadReported = true;
   stopPump();
-  reportRuntimeError(reason, true);
+  reportRuntimeError(reason, false);
 }
 
 function postToFrame(payload: Record<string, unknown>): void {
@@ -174,6 +186,10 @@ function createFrame(): HTMLIFrameElement {
   frame.id = FRAME_ID;
   frame.setAttribute("aria-hidden", "true");
   frame.setAttribute("tabindex", "-1");
+  // Same-tab srcdoc — do NOT point src at the extension sandbox page.
+  // chrome-extension:// sandbox pages spawn a Helper/ANGLE process and
+  // Crashpad-dump the tab when a restyle arrives.
+  frame.setAttribute("sandbox", "allow-scripts");
   Object.assign(frame.style, {
     position: "fixed",
     width: "0",
@@ -188,7 +204,7 @@ function createFrame(): HTMLIFrameElement {
   return frame;
 }
 
-function waitReady(frame: HTMLIFrameElement, session: string): Promise<void> {
+function waitReady(frame: HTMLIFrameElement): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
       window.removeEventListener("message", onReady);
@@ -202,15 +218,40 @@ function waitReady(frame: HTMLIFrameElement, session: string): Promise<void> {
       if (data.type !== "monacle-ready") return;
       window.removeEventListener("message", onReady);
       window.clearTimeout(timer);
-      if (token !== session) {
-        reject(new Error("Sandbox session replaced"));
-        return;
-      }
       resolve();
     }
 
     window.addEventListener("message", onReady);
   });
+}
+
+async function ensureMountedFrame(): Promise<HTMLIFrameElement> {
+  const existing = frameEl();
+  if (existing && frameIsUsable()) return existing;
+  existing?.remove();
+
+  ensureListener();
+  const html = await loadSandboxHtml();
+  const frame = createFrame();
+  const ready = waitReady(frame);
+  frame.srcdoc = html;
+  await ready;
+  return frame;
+}
+
+/** Mount the srcdoc runtime host before a restyle so apply does not spawn it. */
+export function prewarmSandboxFrame(): void {
+  if (!isExtensionContextValid()) return;
+  mountChain = mountChain.then(
+    async () => {
+      try {
+        return await ensureMountedFrame();
+      } catch {
+        return null;
+      }
+    },
+    () => null,
+  );
 }
 
 /** Stop pump + runtime without destroying the iframe (avoids ANGLE/GPU process thrash). */
@@ -272,46 +313,25 @@ async function startSandboxRuntimeInner(
   generation: number,
 ): Promise<void> {
   if (generation !== startGeneration) return;
-
-  // Prefer reusing the sandboxed iframe. Destroying/recreating it on every
-  // restyle spins up a new Chrome Helper (Renderer) + ANGLE context and has
-  // been crashing the extension (Crashpad dumps at each "Restyle ready").
-  const reusable = frameIsUsable();
-  if (reusable) {
-    stopSandboxSession();
-  } else {
-    teardownSandbox();
+  if (!isExtensionContextValid()) {
+    throw new Error("Extension context invalidated");
   }
+
+  // Reuse the srcdoc frame. Never assign chrome-extension:// sandbox.html
+  // as iframe.src — that Helper/ANGLE spawn Crashpad-dumps on apply.
+  stopSandboxSession();
   if (generation !== startGeneration) return;
 
   if (!document.getElementById(OVERLAY_ID)) {
     throw new Error("Overlay host missing — cannot start sandboxed runtime");
   }
 
-  ensureListener();
+  await ensureMountedFrame();
+  if (generation !== startGeneration) return;
+
   token = `rt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   handlers = next;
   queries = {};
-
-  if (generation !== startGeneration) return;
-
-  let frame = frameEl();
-  if (!frame || !reusable) {
-    frame?.remove();
-    frame = createFrame();
-    frame.addEventListener("error", () => {
-      noteDeadFrame("Sandbox frame failed to load");
-    });
-    const session = token;
-    const ready = waitReady(frame, session);
-    frame.src = sandboxUrl();
-    await ready;
-
-    if (generation !== startGeneration || token !== session) {
-      frame.remove();
-      return;
-    }
-  }
 
   startPump();
   postToFrame({

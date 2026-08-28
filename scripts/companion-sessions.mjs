@@ -211,6 +211,18 @@ export function ingestChunk(sessionId, chunk) {
   }
 }
 
+function editLabelForPayload(payload) {
+  const t = String(payload || "");
+  if (
+    /"runtime"\s*:/.test(t) &&
+    !/"css"\s*:/.test(t) &&
+    !/"overlayHtml"\s*:/.test(t)
+  ) {
+    return "Editing scene";
+  }
+  return "Writing restyle";
+}
+
 function formatSnapshot(session) {
   const elapsedMs = session.startedAt ? Date.now() - session.startedAt : 0;
   const secs = Math.max(1, Math.round(elapsedMs / 1000));
@@ -218,8 +230,11 @@ function formatSnapshot(session) {
   if (session.running && session.thinking) {
     steps.push(`Thinking: ${session.thinking}`);
   }
-  if (session.payload) {
-    steps.push(session.payload);
+  if (
+    session.payload &&
+    !steps.some((s) => /^(Writing restyle|Editing scene)/i.test(s))
+  ) {
+    steps.push(editLabelForPayload(session.payload));
   }
   return {
     sessionId: session.id,
@@ -228,6 +243,9 @@ function formatSnapshot(session) {
     model: session.model,
     elapsedMs,
     promptPreview: session.promptPreview,
+    thinking: session.running ? session.thinking : "",
+    hasPayload: Boolean(session.payload),
+    payload: session.payload || "",
     lines: steps,
     raw: recentLines(40),
     summary: session.running
@@ -246,6 +264,9 @@ function emptySnapshot() {
     model: null,
     elapsedMs: 0,
     promptPreview: "",
+    thinking: "",
+    hasPayload: false,
+    payload: "",
     lines: [],
     raw: recentLines(40),
     summary: "",
@@ -292,7 +313,7 @@ export function aggregateSnapshot() {
       lines.push(`[${tag}] Thinking: ${session.thinking}`);
     }
     if (session.payload) {
-      lines.push(`[${tag}] ${session.payload}`);
+      lines.push(`[${tag}] ${editLabelForPayload(session.payload)}`);
     }
   }
   return {
@@ -300,6 +321,9 @@ export function aggregateSnapshot() {
     running: true,
     count: running.length,
     lines,
+    thinking: primary.running ? primary.thinking : "",
+    hasPayload: running.some((s) => Boolean(s.payload)),
+    payload: "",
     summary: `${running.length} agents running`,
     sessions: listed,
   };

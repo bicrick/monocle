@@ -39,6 +39,7 @@ export class StatelessLlmProvider implements AgentProvider {
     history: Array<{ role: "user" | "assistant"; content: string }>,
     pageContext: PageContext,
     _images?: import("../shared/types").PromptImage[],
+    signal?: AbortSignal,
   ): AsyncIterable<AgentEvent> {
     const contextBlock = [
       "PAGE CONTEXT (sanitized):",
@@ -61,8 +62,8 @@ export class StatelessLlmProvider implements AgentProvider {
     try {
       const text =
         this.settings.provider === "anthropic"
-          ? await this.callAnthropic(history, contextBlock)
-          : await this.callOpenAiCompatible(history, contextBlock);
+          ? await this.callAnthropic(history, contextBlock, signal)
+          : await this.callOpenAiCompatible(history, contextBlock, signal);
 
       if (text.trim()) {
         yield { type: "text", text };
@@ -79,6 +80,14 @@ export class StatelessLlmProvider implements AgentProvider {
 
       yield { type: "done" };
     } catch (err) {
+      if (
+        (err instanceof DOMException && err.name === "AbortError") ||
+        (err instanceof Error && err.name === "AbortError") ||
+        signal?.aborted
+      ) {
+        yield { type: "stopped" };
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       yield { type: "error", message };
       yield { type: "done" };
@@ -88,6 +97,7 @@ export class StatelessLlmProvider implements AgentProvider {
   private async callAnthropic(
     history: Array<{ role: "user" | "assistant"; content: string }>,
     userContent: string,
+    signal?: AbortSignal,
   ): Promise<string> {
     const base = (this.settings.baseUrl || "https://api.anthropic.com").replace(
       /\/$/,
@@ -106,6 +116,7 @@ export class StatelessLlmProvider implements AgentProvider {
         "anthropic-version": "2023-06-01",
         "anthropic-dangerous-direct-browser-access": "true",
       },
+      signal,
       body: JSON.stringify({
         model: this.settings.model,
         max_tokens: 4096,
@@ -131,6 +142,7 @@ export class StatelessLlmProvider implements AgentProvider {
   private async callOpenAiCompatible(
     history: Array<{ role: "user" | "assistant"; content: string }>,
     userContent: string,
+    signal?: AbortSignal,
   ): Promise<string> {
     const base = (
       this.settings.baseUrl ||
@@ -151,6 +163,7 @@ export class StatelessLlmProvider implements AgentProvider {
         "content-type": "application/json",
         authorization: `Bearer ${this.settings.apiKey}`,
       },
+      signal,
       body: JSON.stringify({
         model: this.settings.model,
         messages,

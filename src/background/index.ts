@@ -11,7 +11,14 @@ import type {
   Settings,
 } from "../shared/types";
 import { createProvider, loadSettings, saveSettings } from "../agent";
+import { isTransientHostError } from "../content/extensionContext";
 import { validatePatch } from "../patches/schema";
+import {
+  ensureContentScript,
+  isRestrictedUrl,
+  pingTab,
+  sendApplyPatch,
+} from "./contentBridge";
 import * as sessions from "./sessions";
 
 self.addEventListener("error", (event) => {
@@ -34,6 +41,8 @@ interface TabRuntime {
   lastApplyAt: number;
   repairUsed: boolean;
   pendingRepair: string | null;
+  abort: AbortController | null;
+  cancelled: boolean;
 }
 
 const REPAIR_WINDOW_MS = 2000;
@@ -53,6 +62,8 @@ function getTab(tabId: number): TabRuntime {
       lastApplyAt: 0,
       repairUsed: false,
       pendingRepair: null,
+      abort: null,
+      cancelled: false,
     };
     tabs.set(tabId, state);
   }
@@ -65,6 +76,11 @@ chrome.runtime.onInstalled.addListener(() => {
     .catch(() => {
       // older chrome
     });
+  void reinjectSessionTabs();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void reinjectSessionTabs();
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
@@ -121,25 +137,81 @@ async function buildTabState(tabId: number): Promise<RuntimeMessage> {
     sessions: list,
     messages: chat.messages,
     busy: state.busy,
-    hasPatch: state.hasPatch,
+    hasPatch: state.hasPatch || Boolean(chat.lastPatch),
     activity: state.busy ? state.activity : chat.activity,
     pageUrl: meta.url,
     pageTitle: meta.title,
   };
 }
 
+const applyChain = new Map<number, Promise<void>>();
+
+function waitForApply(tabId: number): Promise<void> {
+  return applyChain.get(tabId) ?? Promise.resolve();
+}
+
+function enqueueApply<T>(tabId: number, fn: () => Promise<T>): Promise<T> {
+  const prev = applyChain.get(tabId) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  applyChain.set(
+    tabId,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
+
+async function requestSnapshot(tabId: number): Promise<PageContext> {
+  const res = (await chrome.tabs.sendMessage(tabId, {
+    type: "GET_SNAPSHOT",
+  })) as RuntimeMessage;
+  if (res?.type !== "SNAPSHOT") {
+    throw new Error("Could not capture page snapshot");
+  }
+  return res.context;
+}
+
+/** After HMR / SW restart, put a live content script back on pages we restyled. */
+async function reinjectSessionTabs(): Promise<void> {
+  const list = await sessions.listSessions();
+  const keys = new Set(list.map((s) => s.urlKey));
+  if (!keys.size) return;
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    if (tab.id == null || !tab.url || isRestrictedUrl(tab.url)) continue;
+    if (!keys.has(sessions.urlKeyFrom(tab.url))) continue;
+    try {
+      await ensureContentScript(tab.id);
+    } catch {
+      // restricted frame or no host access
+    }
+  }
+}
+
+async function restoreLastPatch(tabId: number): Promise<boolean> {
+  const chat = await ensureChatForTab(tabId);
+  if (!chat.lastPatch) return false;
+  await applyPatchToTab(tabId, chat.lastPatch);
+  getTab(tabId).hasPatch = true;
+  return true;
+}
+
 async function getSnapshot(tabId: number): Promise<PageContext> {
   try {
-    const res = (await chrome.tabs.sendMessage(tabId, {
-      type: "GET_SNAPSHOT",
-    })) as RuntimeMessage;
-    if (res?.type !== "SNAPSHOT") {
-      throw new Error("Could not capture page snapshot");
+    await ensureContentScript(tabId);
+    return await requestSnapshot(tabId);
+  } catch (err) {
+    const tab = await chrome.tabs.get(tabId);
+    if (isRestrictedUrl(tab.url || "")) {
+      throw new Error(
+        "This page cannot run Monacle (chrome://, Web Store, or similar). Open a normal website tab.",
+      );
     }
-    return res.context;
-  } catch {
+    const reason = err instanceof Error ? err.message : String(err);
     throw new Error(
-      "Content script not ready. Refresh the tab, then try again.",
+      `Content script not ready (${reason}). Reload Monacle on chrome://extensions, then refresh this page.`,
     );
   }
 }
@@ -148,13 +220,21 @@ async function applyPatchToTab(tabId: number, patch: Patch): Promise<{
   opErrors?: string[];
   runtimeStarted?: boolean;
 }> {
+  return enqueueApply(tabId, () => applyPatchToTabInner(tabId, patch));
+}
+
+async function applyPatchToTabInner(tabId: number, patch: Patch): Promise<{
+  opErrors?: string[];
+  runtimeStarted?: boolean;
+}> {
   const tab = getTab(tabId);
   tab.lastApplyAt = Date.now();
+  if (tab.chatSessionId) {
+    await sessions.setLastPatch(tab.chatSessionId, patch);
+  }
   try {
-    const res = (await chrome.tabs.sendMessage(tabId, {
-      type: "APPLY_PATCH",
-      patch,
-    })) as RuntimeMessage;
+    await ensureContentScript(tabId);
+    const res = await sendApplyPatch(tabId, patch);
     if (res?.type === "PATCH_APPLIED") {
       tab.hasPatch = Boolean(
         patch.css || patch.overlayHtml || patch.ops || res.runtimeStarted,
@@ -241,6 +321,7 @@ async function maybeStartRepair(
   fatal = false,
 ): Promise<void> {
   if (!fatal) return;
+  if (isTransientHostError(error)) return;
   const runtime = getTab(tabId);
   if (runtime.repairUsed) return;
   if (!runtime.lastApplyAt || Date.now() - runtime.lastApplyAt > REPAIR_WINDOW_MS) {
@@ -255,6 +336,36 @@ async function maybeStartRepair(
   await handlePrompt(tabId, repairPromptFor(error), runtime.chatSessionId ?? undefined, undefined, {
     isRepair: true,
   });
+}
+
+async function stopCompanionRun(sessionId: string): Promise<void> {
+  try {
+    const settings = await loadSettings();
+    const base = (settings.baseUrl || "http://127.0.0.1:8787").replace(
+      /\/$/,
+      "",
+    );
+    await fetch(`${base}/stop`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    });
+  } catch {
+    // companion offline or already gone
+  }
+}
+
+async function handleStop(
+  tabId: number,
+  sessionIdHint?: string,
+): Promise<void> {
+  const runtime = getTab(tabId);
+  const sessionId = sessionIdHint || runtime.chatSessionId;
+  if (!runtime.busy) return;
+  runtime.cancelled = true;
+  runtime.pendingRepair = null;
+  runtime.abort?.abort();
+  if (sessionId) await stopCompanionRun(sessionId);
 }
 
 async function handlePrompt(
@@ -286,10 +397,16 @@ async function handlePrompt(
   } else {
     await pushMessage(tabId, sessionId, {
       role: "user",
-      content: prompt,
+      content:
+        images?.length && prompt === "Restyle based on the attached image(s)."
+          ? ""
+          : prompt,
       ts: Date.now(),
+      images: images?.length ? images : undefined,
     });
   }
+  runtime.cancelled = false;
+  runtime.abort = new AbortController();
   runtime.activity = [];
   await progress(
     tabId,
@@ -300,6 +417,10 @@ async function handlePrompt(
   try {
     const provider = await createProvider();
     const context = await getSnapshot(tabId);
+    if (runtime.cancelled) {
+      await progress(tabId, sessionId, "Stopped", "done");
+      return;
+    }
     if (chat.lastRuntimeError) {
       context.lastRuntimeError = chat.lastRuntimeError;
     }
@@ -328,13 +449,7 @@ async function handlePrompt(
         chat.cursorSessionId || runtime.agentSession.cursorSessionId;
     }
 
-    await progress(
-      tabId,
-      sessionId,
-      runtime.agentSession.cursorSessionId
-        ? "Continuing chat"
-        : "Asking Cursor",
-    );
+    await progress(tabId, sessionId, "Thinking");
 
     const fresh = await sessions.getSession(sessionId);
     const llmHistory = fresh?.history ?? [];
@@ -351,7 +466,12 @@ async function handlePrompt(
       llmHistory,
       context,
       images,
+      runtime.abort?.signal,
     )) {
+      if (runtime.cancelled || event.type === "stopped") {
+        runtime.cancelled = true;
+        break;
+      }
       if (event.type === "cursor_session") {
         runtime.agentSession.cursorSessionId = event.cursorSessionId;
         await sessions.setCursorSessionId(sessionId, event.cursorSessionId);
@@ -420,6 +540,7 @@ async function handlePrompt(
         ) {
           last.detail = event.line.detail;
           last.ts = event.line.ts;
+          last.thinking = event.line.thinking;
           await sessions.setActivity(sessionId, runtime.activity);
           broadcast(
             tabId,
@@ -427,7 +548,13 @@ async function handlePrompt(
             sessionId,
           );
         } else {
-          broadcast(tabId, event, sessionId);
+          if (last?.state === "active") last.state = "done";
+          runtime.activity.push(event.line);
+          if (runtime.activity.length > 24) {
+            runtime.activity = runtime.activity.slice(-24);
+          }
+          await sessions.setActivity(sessionId, runtime.activity);
+          broadcast(tabId, { type: "progress", line: event.line }, sessionId);
         }
       } else if (event.type === "error") {
         await progress(tabId, sessionId, "Failed", "error", event.message);
@@ -450,6 +577,12 @@ async function handlePrompt(
     }
 
     assistantText = stripModelNoise(assistantText) || assistantText;
+
+    if (runtime.cancelled) {
+      await progress(tabId, sessionId, "Stopped", "done");
+      broadcast(tabId, { type: "stopped" }, sessionId);
+      return;
+    }
 
     if (assistantText.trim()) {
       await pushMessage(tabId, sessionId, {
@@ -480,20 +613,26 @@ async function handlePrompt(
       await progress(tabId, sessionId, "Finished", "done");
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    broadcast(tabId, { type: "error", message }, sessionId);
-    await pushMessage(tabId, sessionId, {
-      role: "system",
-      content: message,
-      ts: Date.now(),
-    });
+    if (runtime.cancelled) {
+      await progress(tabId, sessionId, "Stopped", "done");
+      broadcast(tabId, { type: "stopped" }, sessionId);
+    } else {
+      const message = err instanceof Error ? err.message : String(err);
+      broadcast(tabId, { type: "error", message }, sessionId);
+      await pushMessage(tabId, sessionId, {
+        role: "system",
+        content: message,
+        ts: Date.now(),
+      });
+    }
   } finally {
     // Clear busy before notifying the panel so GET_TAB_STATE / refreshState
     // cannot re-apply busy=true after the composer unlocked.
     runtime.busy = false;
+    runtime.abort = null;
     broadcast(tabId, { type: "done" }, sessionId);
     const queued = runtime.pendingRepair;
-    if (queued) {
+    if (queued && !runtime.cancelled) {
       runtime.pendingRepair = null;
       void maybeStartRepair(tabId, queued, true);
     }
@@ -512,6 +651,10 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
         const tab = getTab(tabId);
         const sessionId = tab.chatSessionId;
         const text = message.message || "Scene runtime failed";
+        if (isTransientHostError(text)) {
+          sendResponse({ ok: true });
+          break;
+        }
         if (sessionId) {
           await sessions.setLastRuntimeError(sessionId, text);
           await progress(
@@ -529,6 +672,28 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
         );
         sendResponse({ ok: true });
         void maybeStartRepair(tabId, text, Boolean(message.fatal));
+        break;
+      }
+      case "CONTENT_READY": {
+        const tabId = sender.tab?.id;
+        if (tabId == null) {
+          sendResponse({ ok: false });
+          break;
+        }
+        const chat = await ensureChatForTab(tabId);
+        if (!chat.lastPatch) {
+          sendResponse({ ok: true, restored: false });
+          break;
+        }
+        await waitForApply(tabId);
+        const live = await pingTab(tabId);
+        if (live?.runtimeLive) {
+          getTab(tabId).hasPatch = true;
+          sendResponse({ ok: true, restored: false });
+          break;
+        }
+        const restored = await restoreLastPatch(tabId);
+        sendResponse({ ok: true, restored });
         break;
       }
       case "INJECT_THREE_STAGE": {
@@ -594,6 +759,10 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
           createdAt: existing.createdAt,
           cursorSessionId: existing.cursorSessionId,
         };
+        if (existing.lastPatch) {
+          runtime.hasPatch = true;
+          void applyPatchToTab(message.tabId, existing.lastPatch);
+        }
         sendResponse(await buildTabState(message.tabId));
         break;
       }
@@ -627,11 +796,18 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
         sendResponse({ ok: true });
         break;
       }
+      case "STOP_PROMPT": {
+        await handleStop(message.tabId, message.sessionId);
+        sendResponse({ ok: true });
+        break;
+      }
       case "RESET": {
         const tabId = message.tabId ?? (await activeTabId());
         if (tabId != null) {
           await resetTab(tabId);
           const chat = await ensureChatForTab(tabId);
+          await sessions.setLastPatch(chat.id, undefined);
+          getTab(tabId).hasPatch = false;
           await pushMessage(tabId, chat.id, {
             role: "system",
             content: "Reset page scene.",
