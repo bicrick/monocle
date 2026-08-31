@@ -8,6 +8,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   ingestRaw,
   logPath,
@@ -26,12 +27,19 @@ import {
   listSnapshots,
   maxConcurrent,
   snapshot,
+  setSessionOrigin,
+  requestTool,
+  resolveTool,
+  cancelPendingTool,
 } from "./companion-status.mjs";
 import { createStreamParser } from "./cli-stream.mjs";
+import { fallbackCatalog, parseListModels } from "./cli-models.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.MONACLE_PORT || 8787);
 const AGENT_TIMEOUT_MS = Number(process.env.MONACLE_AGENT_TIMEOUT_MS || 240_000);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const TAB_MCP_SCRIPT = path.join(__dirname, "monacle-tab-mcp.mjs");
 const AGENT_CANDIDATES = [
   process.env.CURSOR_AGENT,
   "agent",
@@ -92,6 +100,55 @@ function chatWorkspace(sessionId) {
   return dir;
 }
 
+/** Point Cursor CLI (cwd = chat workspace) at Monacle tab tools. */
+function ensureTabMcp(sessionId) {
+  const cwd = chatWorkspace(sessionId);
+  const cursorDir = path.join(cwd, ".cursor");
+  fs.mkdirSync(cursorDir, { recursive: true });
+  const mcpPath = path.join(cursorDir, "mcp.json");
+  const config = {
+    mcpServers: {
+      "monacle-tab": {
+        command: process.execPath,
+        args: [TAB_MCP_SCRIPT],
+        env: {
+          MONACLE_SESSION_ID: String(sessionId || ""),
+          MONACLE_COMPANION: `http://${HOST}:${PORT}`,
+        },
+      },
+    },
+  };
+  fs.writeFileSync(mcpPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+  // Best-effort: put monacle-tab on the local approved list before -p spawn.
+  try {
+    const agent = resolveAgent();
+    const child = spawn(agent, ["mcp", "enable", "monacle-tab"], {
+      cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr?.on("data", (c) => {
+      stderr += c.toString();
+    });
+    child.on("close", (code) => {
+      if (code !== 0) {
+        writeLog(
+          `mcp enable monacle-tab exit=${code} ${stderr.trim().slice(0, 120)}`,
+          { echo: false, session: sessionId },
+        );
+      }
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    writeLog(`mcp enable failed: ${message}`, {
+      echo: false,
+      session: sessionId,
+    });
+  }
+}
+
 /** @type {Map<string, import("node:child_process").ChildProcess>} */
 const liveChildren = new Map();
 
@@ -105,6 +162,7 @@ function registerChild(sessionId, child) {
 }
 
 function stopAgent(sessionId) {
+  cancelPendingTool(sessionId, "Agent stopped");
   const child = liveChildren.get(sessionId);
   if (!child) return false;
   writeLog("cli stop requested — SIGTERM", { session: sessionId });
@@ -125,6 +183,90 @@ function stopAgent(sessionId) {
   return true;
 }
 
+const MODELS_TTL_MS = 10 * 60 * 1000;
+/** @type {{ at: number, catalog: ReturnType<typeof parseListModels> } | null} */
+let modelsCache = null;
+/** @type {Promise<ReturnType<typeof parseListModels>> | null} */
+let modelsInflight = null;
+
+function listModelsRaw() {
+  return new Promise((resolve, reject) => {
+    const agent = resolveAgent();
+    const child = spawn(agent, ["--list-models"], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // ignore
+      }
+      reject(new Error("Cursor CLI --list-models timed out"));
+    }, 20_000);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      if (err.code === "ENOENT") {
+        reject(
+          new Error(
+            "Cursor CLI not found. Install with: curl https://cursor.com/install -fsS | bash — then run: agent login",
+          ),
+        );
+        return;
+      }
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(
+          new Error(
+            stderr.trim() || stdout.trim() || `agent --list-models exited ${code}`,
+          ),
+        );
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+async function loadModelCatalog() {
+  if (modelsCache && Date.now() - modelsCache.at < MODELS_TTL_MS) {
+    return modelsCache.catalog;
+  }
+  if (modelsInflight) return modelsInflight;
+  modelsInflight = (async () => {
+    try {
+      const text = await listModelsRaw();
+      const catalog = parseListModels(text);
+      modelsCache = { at: Date.now(), catalog };
+      writeLog(
+        `models listed n=${catalog.models.length} source=${catalog.source}`,
+        { echo: false },
+      );
+      return catalog;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      writeLog(`GET /models fallback: ${message}`, { echo: false });
+      const catalog = { ...fallbackCatalog(), error: message };
+      return catalog;
+    } finally {
+      modelsInflight = null;
+    }
+  })();
+  return modelsInflight;
+}
+
 function runAgent(prompt, model, sessionId, opts = {}) {
   const agent = resolveAgent();
   const resumeId =
@@ -133,10 +275,14 @@ function runAgent(prompt, model, sessionId, opts = {}) {
       : null;
   // Stable cwd per Monacle chat so --resume can find prior CLI state.
   const cwd = chatWorkspace(sessionId);
+  // Default mode (omit --mode) = full agent with tools. CLI only allows
+  // --mode plan|ask (read-only). Cwd is ~/.monacle/agent-chats/<id>/ — not the repo.
+  ensureTabMcp(sessionId);
   const args = [
     "-p",
     "--trust",
-    "--mode=ask",
+    "--force",
+    "--approve-mcps",
     "--output-format",
     "stream-json",
     "--stream-partial-output",
@@ -306,15 +452,21 @@ function buildPrompt(body, imagePaths) {
   return [
     body.systemPrompt || "",
     "",
-    "Do not edit any files. Reply only with the JSON patch (css + ops + overlayHtml + runtime as needed).",
+    "Do not edit any files in this workspace. Your cwd is an isolated Monacle chat folder.",
+    "Tab tools (MCP monacle-tab): read_page, list_links, navigate — call them only when you need live page content or other same-origin pages. Conversational turns do not require tools.",
+    "Do not narrate intent as your final answer. After any tools, the JSON \"message\" must be the actual answer to the user (summary, reply, etc.) — never only \"I'll look…\" / \"I'll read…\".",
+    "Reply with one final JSON object that always includes a conversational \"message\".",
+    "The sidepanel already greeted the user — do not greet again.",
+    "If the user is asking, clarifying, or chatting (and you already have enough context from history/tools): message-only JSON {\"message\":\"...\"}.",
+    "If they want the page restyled, include css + ops + overlayHtml + runtime as needed along with message.",
     "A CSS-only patch is a failure when the user asked for a dynamic or environmental change — include runtime JS using monacle.*.",
     "For 3D / 3js / moon: use monacle.three.* (bundled page-world Three.js). Do not use CDN Three, new THREE.WebGLRenderer, getContext('webgl'), or monacle.canvas(). DOM motion may use monacle.create().",
     "If this is a follow-up in the same chat, modify the existing scene (incremental) unless the user asks for a full reset.",
     "If you emit a javascript fence instead of JSON, it is applied as live runtime on the page (not a sandbox).",
     "",
     history ? `PRIOR TURNS:\n${history}\n` : "",
-    resumeId ? "FOLLOW-UP TURN (same chat — continue the existing scene).\n" : "",
-    "PAGE CONTEXT (sanitized):",
+    resumeId ? "FOLLOW-UP TURN (same chat — continue the conversation and existing scene).\n" : "",
+    "TAB (light — use read_page for full text when needed):",
     JSON.stringify(
       {
         url: body.context?.url,
@@ -329,7 +481,7 @@ function buildPrompt(body, imagePaths) {
     ),
     "",
     imageBlock,
-    "USER REQUEST:",
+    "USER:",
     body.prompt || "(see attached images)",
   ]
     .filter((x) => x != null)
@@ -397,6 +549,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/models") {
+    const catalog = await loadModelCatalog();
+    json(res, 200, catalog);
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/health") {
     json(res, 200, {
       ok: true,
@@ -435,6 +593,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/tool-call") {
+    try {
+      const body = await readBody(req);
+      const sessionId = body.sessionId || body.session;
+      const name = body.name || body.tool;
+      if (!sessionId || !name) {
+        json(res, 400, { error: "Missing sessionId or name" });
+        return;
+      }
+      writeLog(`tool-call ${name}`, { session: sessionId });
+      const result = await requestTool(
+        String(sessionId),
+        String(name),
+        body.args || body.arguments || {},
+      );
+      json(res, 200, { ok: true, result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status =
+        err instanceof SessionError && err.status ? err.status : 500;
+      json(res, status, {
+        error: message,
+        code: err instanceof SessionError ? err.code : undefined,
+      });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/tool-result") {
+    try {
+      const body = await readBody(req);
+      const sessionId = body.sessionId || body.session;
+      const toolId = body.toolId || body.id;
+      if (!sessionId) {
+        json(res, 400, { error: "Missing sessionId" });
+        return;
+      }
+      if (body.error) {
+        cancelPendingTool(String(sessionId), String(body.error));
+        json(res, 200, { ok: true, cancelled: true });
+        return;
+      }
+      resolveTool(String(sessionId), toolId, body.result ?? body);
+      writeLog(`tool-result ${toolId || ""}`, { session: sessionId });
+      json(res, 200, { ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status =
+        err instanceof SessionError && err.status ? err.status : 500;
+      json(res, status, {
+        error: message,
+        code: err instanceof SessionError ? err.code : undefined,
+      });
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/restyle") {
     let imageDir = null;
     let session = null;
@@ -453,6 +668,9 @@ const server = http.createServer(async (req, res) => {
         source: body.source,
         prompt: body.prompt,
       });
+      if (body.context?.url) {
+        setSessionOrigin(session.id, body.context.url);
+      }
       req.on("close", () => {
         if (!completed && session) stopAgent(session.id);
       });

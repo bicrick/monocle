@@ -97,9 +97,11 @@ async function main() {
     });
     await panel.waitForSelector("#prompt");
     assert.ok(await panel.$("#sandbox-frame"));
-    assert.ok(await panel.$("#history"));
+    assert.ok(await panel.$("#history-toggle"));
+    assert.ok(await panel.$("#history-panel"));
     assert.ok(await panel.$("#history-list"));
     assert.ok(await panel.$("#history-count"));
+    assert.ok(await panel.$("#chat-title"));
     assert.ok(await panel.$("#conn-host"));
 
     await panel.waitForSelector(".model-picker-trigger", { timeout: 5000 });
@@ -119,24 +121,33 @@ async function main() {
     results.modelPicker = picker;
     assert.equal(picker.present, true);
     assert.equal(picker.hasMenu, true);
-    assert.match(picker.label, /Auto|Composer|Sonnet|GPT|Grok/i);
+    assert.match(
+      picker.label,
+      /Auto|Composer|Sonnet|GPT|Grok|Fast|High|Medium|Low/i,
+    );
 
     const history = await panel.evaluate(() => {
-      const details = document.getElementById("history");
+      const toggle = document.getElementById("history-toggle");
+      const panelEl = document.getElementById("history-panel");
       const count = document.getElementById("history-count");
       const list = document.getElementById("history-list");
       const newBtn = document.getElementById("new-btn");
+      const title = document.getElementById("chat-title");
       return {
-        details: !!details,
+        toggle: !!toggle,
+        panel: !!panelEl,
         countText: count?.textContent ?? null,
         listPresent: !!list,
         newBtn: !!newBtn,
+        title: !!title,
       };
     });
     results.history = history;
-    assert.equal(history.details, true);
+    assert.equal(history.toggle, true);
+    assert.equal(history.panel, true);
     assert.equal(history.listPresent, true);
     assert.equal(history.newBtn, true);
+    assert.equal(history.title, true);
 
     const grow = await panel.evaluate(() => {
       const ta = document.getElementById("prompt");

@@ -48,6 +48,20 @@ export interface PageContext {
   lastRuntimeError?: string;
 }
 
+/** Readable extract for agent explore tools (full text, not landmark snippets). */
+export interface PageLink {
+  href: string;
+  text: string;
+}
+
+export interface PageRead {
+  url: string;
+  title: string;
+  text: string;
+  links: PageLink[];
+  capturedAt: number;
+}
+
 export type PatchOpType =
   | "hide"
   | "show"
@@ -120,6 +134,8 @@ export type AgentEvent =
 export type RuntimeMessage =
   | { type: "GET_SNAPSHOT" }
   | { type: "SNAPSHOT"; context: PageContext }
+  | { type: "GET_PAGE_READ" }
+  | { type: "PAGE_READ"; page: PageRead }
   | { type: "APPLY_PATCH"; patch: Patch }
   | { type: "RESET"; tabId?: number }
   | {

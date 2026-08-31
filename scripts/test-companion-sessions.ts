@@ -10,7 +10,10 @@ import {
   ingestThinking,
   listSnapshots,
   maxConcurrent,
+  requestTool,
   resetForTests,
+  resolveTool,
+  setSessionOrigin,
   snapshot,
 } from "./companion-sessions.mjs";
 
@@ -101,6 +104,29 @@ assert.equal(listSnapshots().length >= 2, true);
 const missing = snapshot("does-not-exist");
 assert.equal(missing.running, false);
 assert.equal(missing.sessionId, "does-not-exist");
+
+const toolSession = beginRun({
+  sessionId: "sess_tools",
+  source: "sidepanel",
+  prompt: "explore",
+});
+setSessionOrigin("sess_tools", "https://www.bicrick.com/about");
+const pendingPromise = requestTool("sess_tools", "read_page", {});
+await new Promise((r) => setTimeout(r, 20));
+const withTool = snapshot("sess_tools");
+assert.ok(withTool.pendingTool);
+assert.equal(withTool.pendingTool.name, "read_page");
+assert.equal(withTool.originUrl, "https://www.bicrick.com/about");
+resolveTool("sess_tools", withTool.pendingTool.id, {
+  url: "https://www.bicrick.com/about",
+  title: "about",
+  text: "full bio text here",
+  links: [],
+});
+const toolResult = await pendingPromise;
+assert.equal(toolResult.text, "full bio text here");
+assert.equal(snapshot("sess_tools").pendingTool, null);
+endRun("sess_tools");
 
 resetForTests();
 console.log("companion-sessions: ok");

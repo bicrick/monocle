@@ -4,7 +4,6 @@ import type {
   PageContext,
   PromptImage,
   RuntimeMessage,
-  SessionSummary,
 } from "../shared/types";
 import { validatePatch } from "../patches/schema";
 import { createActivityBlock } from "./activity";
@@ -12,9 +11,11 @@ import {
   collectPasteImages,
   createAttachmentTray,
 } from "./attachments";
-import { createChatMessage } from "./chatMessage";
+import { createAssistantDraft, createChatMessage } from "./chatMessage";
+import { createHistoryPanel } from "./historyPanel";
 import { createLogDrawer } from "./logDrawer";
 import { createModelPicker } from "./modelPicker";
+import { isOpenableUrl } from "./sessionTitle";
 import { startTheme } from "../shared/theme";
 
 startTheme();
@@ -27,9 +28,15 @@ const logsBtn = document.getElementById("logs-btn") as HTMLButtonElement;
 const settingsBtn = document.getElementById("settings-btn") as HTMLButtonElement;
 const logHost = document.getElementById("log-host") as HTMLElement;
 const newBtn = document.getElementById("new-btn") as HTMLButtonElement;
-const historyEl = document.getElementById("history") as HTMLDetailsElement;
+const historyToggle = document.getElementById(
+  "history-toggle",
+) as HTMLButtonElement;
+const historyPanelEl = document.getElementById("history-panel") as HTMLElement;
 const historyCount = document.getElementById("history-count") as HTMLElement;
 const historyList = document.getElementById("history-list") as HTMLElement;
+const chatTitle = document.getElementById("chat-title") as HTMLButtonElement;
+const chatStage = document.getElementById("chat-stage") as HTMLElement;
+const appEl = document.getElementById("app") as HTMLElement;
 const attachHost = document.getElementById("attach-host") as HTMLElement;
 const connHost = document.getElementById("conn-host") as HTMLElement;
 const sandboxFrame = document.getElementById(
@@ -96,11 +103,12 @@ function renderMessages(messages: ChatMessage[]): void {
 function appendAssistantDelta(text: string): void {
   if (!text) return;
   if (!draftAssistant) {
-    draftAssistant = document.createElement("div");
-    draftAssistant.className = "msg assistant";
+    draftAssistant = createAssistantDraft();
     transcript.appendChild(draftAssistant);
   }
-  draftAssistant.textContent = (draftAssistant.textContent || "") + text;
+  const body =
+    draftAssistant.querySelector(".msg-text") ?? draftAssistant;
+  body.textContent = (body.textContent || "") + text;
   scrollTranscriptToBottom();
 }
 
@@ -124,112 +132,35 @@ function autoGrow(): void {
   promptEl.style.overflowY = content > maxPx ? "auto" : "hidden";
 }
 
-function relativeTime(ts: number): string {
-  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (sec < 60) return "just now";
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h`;
-  const day = Math.floor(hr / 24);
-  return `${day}d`;
-}
-
-function closeHistory(): void {
-  historyEl.open = false;
-}
-
-/** Titles that are blank shells or look like stored junk / URLs. */
-function isBlankTitle(title: string): boolean {
-  const t = title.replace(/\s+/g, " ").trim();
-  return !t || /^new chat$/i.test(t) || /^untitled( chat)?$/i.test(t);
-}
-
-function isJunkTitle(title: string): boolean {
-  const t = title.replace(/\s+/g, " ").trim();
-  if (!t) return true;
-  if (/^(chrome|moz|safari)-extension:/i.test(t)) return true;
-  if (/^(data|blob):/i.test(t)) return true;
-  if (/^https?:\/\//i.test(t)) return true;
-  // Mostly punctuation / ids with almost no readable words
-  const readable = t.replace(/[^\p{L}\p{N}\s]+/gu, " ").trim();
-  if (readable.length < 2) return true;
-  return false;
-}
-
-function displaySessionTitle(s: SessionSummary): string {
-  const raw = (s.title || "").replace(/\s+/g, " ").trim();
-  if (raw && !isBlankTitle(raw) && !isJunkTitle(raw)) return raw;
-
-  const page = (s.pageTitle || "").replace(/\s+/g, " ").trim();
-  if (page && !isJunkTitle(page)) return page;
-
-  if (s.host) return s.host;
-  return "Untitled chat";
-}
-
-function isEmptyShell(s: SessionSummary): boolean {
-  return isBlankTitle(s.title || "");
-}
-
-/** Hide unused "New chat" shells; keep active and any real turns. */
-function visibleSessions(
-  sessions: SessionSummary[],
-  activeId: string | null,
-): SessionSummary[] {
-  const kept = sessions.filter(
-    (s) => s.id === activeId || !isEmptyShell(s),
-  );
-  if (kept.length) return kept;
-  if (activeId) {
-    const active = sessions.find((s) => s.id === activeId);
-    if (active) return [active];
+async function openSessionPage(url: string): Promise<void> {
+  if (!isOpenableUrl(url)) return;
+  tabId = tabId ?? (await resolveTabId());
+  if (tabId != null) {
+    try {
+      await chrome.tabs.update(tabId, { url });
+      return;
+    } catch {
+      /* fall through to a new tab */
+    }
   }
-  return sessions.slice(0, 1);
+  await chrome.tabs.create({ url });
 }
 
-function renderHistory(
-  sessions: SessionSummary[],
-  activeId: string | null,
-): void {
-  const visible = visibleSessions(sessions, activeId);
-  historyCount.textContent = String(visible.length);
-  historyList.replaceChildren();
-
-  for (const s of visible) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "history-item";
-    if (s.id === activeId) btn.classList.add("is-active");
-    btn.setAttribute("role", "listitem");
-    btn.title = displaySessionTitle(s);
-
-    const title = document.createElement("span");
-    title.className = "history-item-title";
-    title.textContent = displaySessionTitle(s);
-
-    const meta = document.createElement("span");
-    meta.className = "history-item-meta";
-    const host = (s.host || "").trim() || "page";
-    meta.textContent = `${host} · ${relativeTime(s.updatedAt)}`;
-
-    btn.append(title, meta);
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      closeHistory();
-      void openSession(s.id);
-    });
-    historyList.append(btn);
-  }
-
-  if (!visible.length) {
-    const empty = document.createElement("div");
-    empty.className = "history-empty";
-    empty.textContent = "No chats yet";
-    historyList.append(empty);
-  }
-}
+const history = createHistoryPanel({
+  app: appEl,
+  toggle: historyToggle,
+  panel: historyPanelEl,
+  list: historyList,
+  count: historyCount,
+  titleBtn: chatTitle,
+  stage: chatStage,
+  onSelect: (id) => {
+    void openSession(id);
+  },
+  onOpenPage: (url) => {
+    void openSessionPage(url);
+  },
+});
 
 async function resolveTabId(): Promise<number | null> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -247,12 +178,19 @@ function applyTabState(res: RuntimeMessage): void {
   } else if (res.busy) {
     ensureThoughtUnderChat();
   }
-  renderHistory(res.sessions ?? [], res.sessionId);
+  history.render(res.sessions ?? [], res.sessionId);
 }
 
 async function refreshState(): Promise<void> {
-  tabId = await resolveTabId();
-  if (tabId == null) return;
+  try {
+    tabId = await resolveTabId();
+  } catch {
+    tabId = null;
+  }
+  if (tabId == null) {
+    history.render([], null);
+    return;
+  }
   const res = (await chrome.runtime.sendMessage({
     type: "GET_TAB_STATE",
     tabId,
@@ -261,7 +199,7 @@ async function refreshState(): Promise<void> {
 }
 
 async function openSession(id: string): Promise<void> {
-  closeHistory();
+  history.close();
   tabId = await resolveTabId();
   if (tabId == null) return;
   const res = (await chrome.runtime.sendMessage({
@@ -273,7 +211,7 @@ async function openSession(id: string): Promise<void> {
 }
 
 async function newSession(): Promise<void> {
-  closeHistory();
+  history.close();
   tabId = await resolveTabId();
   if (tabId == null) return;
   const res = (await chrome.runtime.sendMessage({

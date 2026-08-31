@@ -8,7 +8,7 @@
     "dev:vite": "vite",
     "build": "tsc --noEmit && node scripts/build-page-stage.mjs && vite build && node scripts/copy-sandbox.mjs && node scripts/build-page-stage.mjs",
     "preview": "vite preview",
-    "test": "npx --yes tsx scripts/test-schema.ts && npx --yes tsx scripts/test-companion-sessions.ts && npx --yes tsx scripts/test-activity-detail.ts",
+    "test": "npx --yes tsx scripts/test-schema.ts && npx --yes tsx scripts/test-companion-sessions.ts && npx --yes tsx scripts/test-activity-detail.ts && npx --yes tsx scripts/test-cli-models.ts && npx --yes tsx scripts/test-session-title.ts",
     "verify": "npm run build && node scripts/verify-extension.mjs",
     "companion": "node scripts/cursor-companion.mjs",
     "loop": "node scripts/ocean-loop.mjs",

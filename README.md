@@ -28,7 +28,7 @@ Chrome → `chrome://extensions` → Developer mode → **Load unpacked** → se
 npm run companion
 ```
 
-It listens only on `http://127.0.0.1:8787`. The extension POSTs the page snapshot there; the companion runs `agent -p --mode=ask` so it does not edit your repo. Multiple `/restyle` sessions run at once (sidepanel + `npm run loop`), each with its own id. `GET /status?session=<id>` polls one run; `GET /sessions` lists them. Cap with `MONACLE_MAX_CONCURRENT` (default 8).
+It listens only on `http://127.0.0.1:8787`. The extension POSTs the page snapshot there; the companion runs `agent -p` (default agent mode with tools; `--mode` only allows ask/plan) in an isolated chat cwd with Monacle tab MCP, so it does not edit your repo. Multiple `/restyle` sessions run at once (sidepanel + `npm run loop`), each with its own id. `GET /status?session=<id>` polls one run; `GET /sessions` lists them; `GET /models` returns the Cursor CLI catalog (Fast / Effort / Model). Cap with `MONACLE_MAX_CONCURRENT` (default 8).
 
 4. Extension options → provider **Cursor CLI (this machine)** → Save. Status should say the companion is running.
 

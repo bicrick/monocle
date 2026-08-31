@@ -7,6 +7,7 @@ export {
   activeCount,
   aggregateSnapshot,
   beginRun,
+  cancelPendingTool,
   endRun,
   ingestChunk,
   ingestPayload,
@@ -14,5 +15,8 @@ export {
   ingestThinking,
   listSnapshots,
   maxConcurrent,
+  requestTool,
+  resolveTool,
+  setSessionOrigin,
   snapshot,
 } from "./companion-sessions.mjs";

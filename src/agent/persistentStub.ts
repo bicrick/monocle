@@ -27,6 +27,7 @@ export class PersistentCloudAgentProvider implements AgentProvider {
     _history: Array<{ role: "user" | "assistant"; content: string }>,
     _pageContext: PageContext,
     _images?: import("../shared/types").PromptImage[],
+    _pageRead?: import("../shared/types").PageRead,
     _signal?: AbortSignal,
   ): AsyncIterable<AgentEvent> {
     throw new Error("PersistentCloudAgentProvider is not implemented in v1");

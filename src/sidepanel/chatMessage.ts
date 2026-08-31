@@ -10,6 +10,13 @@ export function renderChatMessage(el: HTMLElement, msg: ChatMessage): void {
   el.className = `msg ${msg.role}`;
   el.replaceChildren();
 
+  if (msg.role === "assistant") {
+    const label = document.createElement("div");
+    label.className = "msg-label";
+    label.textContent = "Monacle";
+    el.append(label);
+  }
+
   if (msg.images?.length) {
     const thumbs = document.createElement("div");
     thumbs.className = "msg-thumbs";
@@ -34,5 +41,18 @@ export function renderChatMessage(el: HTMLElement, msg: ChatMessage): void {
 export function createChatMessage(msg: ChatMessage): HTMLElement {
   const el = document.createElement("div");
   renderChatMessage(el, msg);
+  return el;
+}
+
+/** Empty assistant shell used while streaming deltas. */
+export function createAssistantDraft(): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "msg assistant";
+  const label = document.createElement("div");
+  label.className = "msg-label";
+  label.textContent = "Monacle";
+  const text = document.createElement("div");
+  text.className = "msg-text";
+  el.append(label, text);
   return el;
 }

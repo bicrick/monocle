@@ -108,10 +108,23 @@ export function validatePatch(raw: unknown): Patch | null {
   return patch;
 }
 
+/** True when the patch changes the page (not message-only chat). */
+export function isVisualPatch(patch: Patch): boolean {
+  return Boolean(
+    patch.css ||
+      patch.overlayHtml ||
+      (patch.ops && patch.ops.length > 0) ||
+      patch.runtime,
+  );
+}
+
 /** Try to extract a Patch from model text (JSON block or fenced). */
 export function extractPatchFromText(text: string): Patch | null {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidates = [fenced?.[1], text];
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(
+    (m) => m[1],
+  );
+  // Prefer the last fence (final answer after tool narration), then bare text.
+  const candidates = [...fences.reverse(), text];
 
   for (const candidate of candidates) {
     if (!candidate) continue;

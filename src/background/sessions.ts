@@ -5,6 +5,7 @@ import type {
   Patch,
   SessionSummary,
 } from "../shared/types";
+import { greetingMessage } from "../shared/greeting";
 import { persistablePatch } from "../patches/persistPatch";
 
 const STORAGE_KEY = "chatSessions";
@@ -97,6 +98,19 @@ export async function findLatestForUrl(
   return matches[0] ?? null;
 }
 
+/**
+ * Ensure an empty session shows the local Monacle greeting.
+ * Does not touch history[] — the greeting is UI-only, never an LLM turn.
+ */
+export async function ensureGreeting(
+  session: ChatSession,
+): Promise<ChatSession> {
+  if (session.messages.length > 0) return session;
+  session.messages = [greetingMessage()];
+  await saveSession(session);
+  return session;
+}
+
 export async function createSession(opts: {
   url: string;
   pageTitle: string;
@@ -111,7 +125,7 @@ export async function createSession(opts: {
     urlKey: urlKeyFrom(opts.url),
     createdAt: now,
     updatedAt: now,
-    messages: [],
+    messages: [greetingMessage(now)],
     history: [],
     activity: [],
   };

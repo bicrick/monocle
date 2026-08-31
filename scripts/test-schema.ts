@@ -6,6 +6,7 @@ import {
   extractCodeFromText,
   extractPatchFromText,
   isRuntimeSourceAllowed,
+  isVisualPatch,
   patchFromRuntimeCode,
   validatePatch,
 } from "../src/patches/schema";
@@ -47,6 +48,28 @@ const fenced = extractPatchFromText(`Sure.
 `);
 assert.ok(fenced);
 assert.equal(fenced!.message, "Dimmed room");
+
+const intentThenAnswer = extractPatchFromText(`I'll read the rest of the site.
+
+\`\`\`json
+{
+  "message": "bicrick.com is Patrick Brown's personal portfolio."
+}
+\`\`\`
+`);
+assert.ok(intentThenAnswer);
+assert.equal(
+  intentThenAnswer!.message,
+  "bicrick.com is Patrick Brown's personal portfolio.",
+);
+assert.equal(isVisualPatch(intentThenAnswer!), false);
+
+const chatOnly = validatePatch({
+  message: "An ocean works well — calm reef or storm?",
+});
+assert.ok(chatOnly);
+assert.equal(isVisualPatch(chatOnly!), false);
+assert.equal(isVisualPatch(fenced!), true);
 
 const code = extractCodeFromText(`
 \`\`\`javascript

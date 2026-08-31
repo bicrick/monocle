@@ -1,12 +1,12 @@
 import {
   formatExpandDetail,
   interpretStatus,
-  type ActivityTalk,
 } from "../shared/activityTalk";
 import type {
   AgentEvent,
   AgentSession,
   PageContext,
+  PageRead,
   PromptImage,
   Settings,
 } from "../shared/types";
@@ -15,7 +15,18 @@ import {
   extractPatchFromText,
   patchFromRuntimeCode,
 } from "../patches/schema";
+import {
+  navigateTab,
+  sendPageRead,
+} from "../background/contentBridge";
 import type { AgentProvider } from "./types";
+
+interface PendingToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  label?: string;
+}
 
 /** Talks to the local Monacle companion, which runs Cursor CLI on this machine. */
 export class CursorCliProvider implements AgentProvider {
@@ -44,12 +55,15 @@ export class CursorCliProvider implements AgentProvider {
     history: Array<{ role: "user" | "assistant"; content: string }>,
     pageContext: PageContext,
     images?: PromptImage[],
+    pageRead?: PageRead,
     signal?: AbortSignal,
   ): AsyncIterable<AgentEvent> {
     const base = (this.settings.baseUrl || "http://127.0.0.1:8787").replace(
       /\/$/,
       "",
     );
+    const originUrl = pageContext.url || session.pageUrl || "";
+    const fulfilled = new Set<string>();
 
     try {
       const restyle = fetch(`${base}/restyle`, {
@@ -99,10 +113,50 @@ export class CursorCliProvider implements AgentProvider {
         if (signal?.aborted) break;
         const raced = await Promise.race([
           done.then(() => "done" as const),
-          sleep(600).then(() => "tick" as const),
+          sleep(400).then(() => "tick" as const),
         ]);
         if (raced !== "tick") break;
-        const talk = await readCliStatus(base, session.id);
+
+        const status = await readCliStatusRaw(base, session.id);
+        if (status?.pendingTool && !fulfilled.has(status.pendingTool.id)) {
+          const tool = status.pendingTool;
+          fulfilled.add(tool.id);
+          const label = tool.label || toolVerb(tool.name);
+          yield {
+            type: "progress",
+            line: {
+              label,
+              detail: tool.name === "navigate"
+                ? String(tool.args?.url || "")
+                : undefined,
+              ts: Date.now(),
+              state: "active",
+            },
+          };
+          try {
+            const result = await fulfillTabTool(
+              session.tabId,
+              tool,
+              originUrl,
+            );
+            await postToolResult(base, session.id, tool.id, result);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            await postToolResult(base, session.id, tool.id, null, message);
+            yield {
+              type: "progress",
+              line: {
+                label: label,
+                detail: message,
+                ts: Date.now(),
+                state: "error",
+              },
+            };
+          }
+          continue;
+        }
+
+        const talk = status ? interpretStatus(status) : null;
         if (talk) {
           const verb = talk.verb || "Thinking";
           const sameVerb = verb === lastVerb;
@@ -196,6 +250,55 @@ export class CursorCliProvider implements AgentProvider {
   }
 }
 
+function toolVerb(name: string): string {
+  if (name === "read_page") return "Reading page";
+  if (name === "list_links") return "Listing links";
+  if (name === "navigate") return "Navigating";
+  return `Tool ${name}`;
+}
+
+async function fulfillTabTool(
+  tabId: number,
+  tool: PendingToolCall,
+  originUrl: string,
+): Promise<PageRead | { links: PageRead["links"]; url: string; title: string }> {
+  if (tool.name === "read_page") {
+    return sendPageRead(tabId);
+  }
+  if (tool.name === "list_links") {
+    const page = await sendPageRead(tabId);
+    return { url: page.url, title: page.title, links: page.links };
+  }
+  if (tool.name === "navigate") {
+    const target = String(tool.args?.url || "");
+    if (!target.trim()) throw new Error("navigate requires url");
+    return navigateTab(tabId, target, originUrl);
+  }
+  throw new Error(`Unknown tab tool: ${tool.name}`);
+}
+
+async function postToolResult(
+  base: string,
+  sessionId: string,
+  toolId: string,
+  result: unknown,
+  error?: string,
+): Promise<void> {
+  try {
+    await fetch(`${base}/tool-result`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        error
+          ? { sessionId, toolId, error }
+          : { sessionId, toolId, result },
+      ),
+    });
+  } catch {
+    // companion may have ended
+  }
+}
+
 function isAbortError(err: unknown): boolean {
   return (
     (err instanceof DOMException && err.name === "AbortError") ||
@@ -207,15 +310,26 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function readCliStatus(
+async function readCliStatusRaw(
   base: string,
   sessionId?: string,
-): Promise<ActivityTalk | null> {
+): Promise<{
+  running?: boolean;
+  summary?: string;
+  model?: string | null;
+  thinking?: string;
+  hasPayload?: boolean;
+  payload?: string;
+  lines?: string[];
+  raw?: string[];
+  pendingTool?: PendingToolCall | null;
+  originUrl?: string | null;
+} | null> {
   try {
     const qs = sessionId ? `?session=${encodeURIComponent(sessionId)}` : "";
     const res = await fetch(`${base}/status${qs}`);
     if (!res.ok) return null;
-    const data = (await res.json()) as {
+    return (await res.json()) as {
       running?: boolean;
       summary?: string;
       model?: string | null;
@@ -224,20 +338,10 @@ async function readCliStatus(
       payload?: string;
       lines?: string[];
       raw?: string[];
+      pendingTool?: PendingToolCall | null;
+      originUrl?: string | null;
     };
-    const steps = data.lines?.length ? data.lines : data.raw ?? [];
-    if (!data.running && !steps.length && !data.thinking) return null;
-    return interpretStatus({
-      running: data.running,
-      summary: data.summary,
-      model: data.model,
-      thinking: data.thinking,
-      hasPayload: data.hasPayload,
-      payload: data.payload,
-      lines: steps,
-    });
   } catch {
     return null;
   }
 }
-

@@ -30,6 +30,20 @@ const sessions = new Map();
  * @property {string[]} lines
  * @property {string} thinking
  * @property {string} payload
+ * @property {string | null} originUrl
+ * @property {PendingTool | null} pendingTool
+ * @property {((result: object) => void) | null} pendingResolve
+ * @property {((err: Error) => void) | null} pendingReject
+ * @property {ReturnType<typeof setTimeout> | null} pendingTimer
+ */
+
+/**
+ * @typedef {object} PendingTool
+ * @property {string} id
+ * @property {string} name
+ * @property {Record<string, unknown>} args
+ * @property {number} ts
+ * @property {string} label
  */
 
 export class SessionError extends Error {
@@ -130,6 +144,11 @@ export function createSession({
     lines: [],
     thinking: "",
     payload: "",
+    originUrl: null,
+    pendingTool: null,
+    pendingResolve: null,
+    pendingReject: null,
+    pendingTimer: null,
   };
   sessions.set(sid, session);
   prune();
@@ -143,11 +162,109 @@ export function getSession(id) {
 export function endSession(id) {
   const session = getSession(id);
   if (!session) return null;
+  cancelPendingTool(id, "Session ended");
   session.running = false;
   session.endedAt = Date.now();
   session.thinking = "";
   prune();
   return session;
+}
+
+export function setSessionOrigin(sessionId, url) {
+  const session = getSession(sessionId);
+  if (!session) return;
+  if (typeof url === "string" && url.trim()) {
+    session.originUrl = url.trim();
+  }
+}
+
+function toolLabel(name, args) {
+  const n = String(name || "tool");
+  if (n === "read_page") return "Reading page";
+  if (n === "list_links") return "Listing links";
+  if (n === "navigate") {
+    const url = typeof args?.url === "string" ? args.url : "";
+    try {
+      const pathOnly = url ? new URL(url).pathname || url : "";
+      return pathOnly ? `Opening ${pathOnly}` : "Navigating";
+    } catch {
+      return "Navigating";
+    }
+  }
+  return `Tool ${n}`;
+}
+
+/**
+ * MCP / CLI calls this — blocks until the extension POSTs /tool-result.
+ * @returns {Promise<object>}
+ */
+export function requestTool(sessionId, name, args = {}, timeoutMs = 90_000) {
+  const session = getSession(sessionId);
+  if (!session || !session.running) {
+    return Promise.reject(
+      new SessionError("No running session for tool call", "NO_SESSION", 404),
+    );
+  }
+  if (session.pendingTool) {
+    return Promise.reject(
+      new SessionError("Another tool is already pending", "TOOL_BUSY", 409),
+    );
+  }
+
+  const id = `tool_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const label = toolLabel(name, args);
+  pushLine(session, `→ ${label}`);
+
+  return new Promise((resolve, reject) => {
+    session.pendingTool = {
+      id,
+      name: String(name || ""),
+      args: args && typeof args === "object" ? args : {},
+      ts: Date.now(),
+      label,
+    };
+    session.pendingResolve = resolve;
+    session.pendingReject = reject;
+    session.pendingTimer = setTimeout(() => {
+      if (session.pendingTool?.id === id) {
+        cancelPendingTool(sessionId, "Tool timed out waiting for the tab");
+      }
+    }, timeoutMs);
+  });
+}
+
+export function resolveTool(sessionId, toolId, result) {
+  const session = getSession(sessionId);
+  if (!session?.pendingTool) {
+    throw new SessionError("No pending tool", "NO_TOOL", 404);
+  }
+  if (toolId && session.pendingTool.id !== toolId) {
+    throw new SessionError("Tool id mismatch", "TOOL_MISMATCH", 409);
+  }
+  const resolve = session.pendingResolve;
+  clearPending(session);
+  pushLine(session, "← Tab tool done");
+  resolve?.(result ?? {});
+  return true;
+}
+
+export function cancelPendingTool(sessionId, reason = "Cancelled") {
+  const session = getSession(sessionId);
+  if (!session?.pendingTool) return false;
+  const reject = session.pendingReject;
+  clearPending(session);
+  reject?.(new Error(reason));
+  return true;
+}
+
+function clearPending(session) {
+  if (session.pendingTimer) {
+    clearTimeout(session.pendingTimer);
+    session.pendingTimer = null;
+  }
+  session.pendingTool = null;
+  session.pendingResolve = null;
+  session.pendingReject = null;
 }
 
 export function beginRun({ sessionId, model, source, prompt } = {}) {
@@ -248,6 +365,16 @@ function formatSnapshot(session) {
     payload: session.payload || "",
     lines: steps,
     raw: recentLines(40),
+    originUrl: session.originUrl || null,
+    pendingTool: session.pendingTool
+      ? {
+          id: session.pendingTool.id,
+          name: session.pendingTool.name,
+          args: session.pendingTool.args,
+          label: session.pendingTool.label,
+          ts: session.pendingTool.ts,
+        }
+      : null,
     summary: session.running
       ? session.thinking
         ? `Thinking… ${secs}s`
@@ -269,6 +396,8 @@ function emptySnapshot() {
     payload: "",
     lines: [],
     raw: recentLines(40),
+    originUrl: null,
+    pendingTool: null,
     summary: "",
     count: 0,
     sessions: [],

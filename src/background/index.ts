@@ -12,7 +12,7 @@ import type {
 } from "../shared/types";
 import { createProvider, loadSettings, saveSettings } from "../agent";
 import { isTransientHostError } from "../content/extensionContext";
-import { validatePatch } from "../patches/schema";
+import { isVisualPatch, validatePatch } from "../patches/schema";
 import {
   ensureContentScript,
   isRestrictedUrl,
@@ -103,7 +103,7 @@ async function ensureChatForTab(tabId: number): Promise<ChatSession> {
   const state = getTab(tabId);
   if (state.chatSessionId) {
     const existing = await sessions.getSession(state.chatSessionId);
-    if (existing) return existing;
+    if (existing) return sessions.ensureGreeting(existing);
   }
 
   const meta = await tabMeta(tabId);
@@ -112,7 +112,7 @@ async function ensureChatForTab(tabId: number): Promise<ChatSession> {
     if (latest) {
       state.chatSessionId = latest.id;
       state.activity = latest.activity ?? [];
-      return latest;
+      return sessions.ensureGreeting(latest);
     }
   }
 
@@ -466,6 +466,7 @@ async function handlePrompt(
       llmHistory,
       context,
       images,
+      undefined,
       runtime.abort?.signal,
     )) {
       if (runtime.cancelled || event.type === "stopped") {
@@ -480,6 +481,14 @@ async function handlePrompt(
       if (event.type === "text") {
         assistantText += event.text;
       } else if (event.type === "patch") {
+        // Message-only JSON is a chat reply — do not apply or persist as a scene.
+        if (!isVisualPatch(event.patch)) {
+          const note = event.patch.message?.trim();
+          // Prefer the JSON message over any earlier streamed intent prose.
+          if (note) assistantText = note;
+          else assistantText = stripModelNoise(assistantText);
+          continue;
+        }
         await progress(
           tabId,
           sessionId,
@@ -498,16 +507,12 @@ async function handlePrompt(
           );
         }
         const note =
-          event.patch.message ||
+          event.patch.message?.trim() ||
           (event.patch.runtime ? "Applied scene." : "Applied restyle.");
         broadcast(tabId, { type: "text", text: note }, sessionId);
         broadcast(tabId, event, sessionId);
-        if (!assistantText.trim()) assistantText = note;
-        else if (!assistantText.includes(note)) {
-          assistantText = `${stripModelNoise(assistantText)}\n\n${note}`;
-        } else {
-          assistantText = stripModelNoise(assistantText);
-        }
+        // Conversational note wins over any pre-tool intent prose in the dump.
+        assistantText = note;
       } else if (event.type === "code") {
         // Legacy: JS fence → live runtime patch (no sandbox).
         const patch = validatePatch({
@@ -606,7 +611,7 @@ async function handlePrompt(
     } else if (!assistantText.trim()) {
       broadcast(
         tabId,
-        { type: "error", message: "Model returned no patch" },
+        { type: "error", message: "Model returned no reply" },
         sessionId,
       );
     } else {
@@ -839,24 +844,35 @@ async function activeTabId(): Promise<number | null> {
 }
 
 function stripModelNoise(text: string): string {
-  let out = text.replace(/```[\s\S]*?```/g, "").trim();
+  const raw = (text || "").trim();
+  if (!raw) return "";
+
+  // Prefer message from a fenced or bare JSON object (final answer).
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [fenced?.[1], raw].filter(Boolean) as string[];
+  for (const candidate of candidates) {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start < 0 || end <= start) continue;
+    try {
+      const parsed = JSON.parse(candidate.slice(start, end + 1)) as {
+        message?: string;
+      };
+      if (typeof parsed.message === "string" && parsed.message.trim()) {
+        return parsed.message.trim();
+      }
+    } catch {
+      // try next
+    }
+  }
+
+  // No JSON message — drop fences and leftover payload braces.
+  let out = raw.replace(/```[\s\S]*?```/g, "").trim();
   const start = out.indexOf("{");
   const end = out.lastIndexOf("}");
   if (start >= 0 && end > start) {
     const before = out.slice(0, start).trim();
     const after = out.slice(end + 1).trim();
-    try {
-      const parsed = JSON.parse(out.slice(start, end + 1)) as {
-        message?: string;
-      };
-      if (typeof parsed.message === "string" && parsed.message.trim()) {
-        return [before, parsed.message.trim(), after]
-          .filter(Boolean)
-          .join("\n");
-      }
-    } catch {
-      // keep prose
-    }
     out = [before, after].filter(Boolean).join("\n").trim();
   }
   return out;

@@ -1,4 +1,4 @@
-import type { Patch, RuntimeMessage } from "../shared/types";
+import type { PageRead, Patch, RuntimeMessage } from "../shared/types";
 
 export function isRestrictedUrl(url: string): boolean {
   return (
@@ -7,6 +7,67 @@ export function isRestrictedUrl(url: string): boolean {
     url.startsWith("https://chrome.google.com/webstore") ||
     url.startsWith("https://chromewebstore.google.com")
   );
+}
+
+export function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}
+
+export async function sendPageRead(tabId: number): Promise<PageRead> {
+  await ensureContentScript(tabId);
+  const res = (await chrome.tabs.sendMessage(tabId, {
+    type: "GET_PAGE_READ",
+  })) as RuntimeMessage;
+  if (res?.type === "PAGE_READ" && res.page) return res.page;
+  throw new Error("Page read failed");
+}
+
+/** Navigate the tab and wait until a content script can answer again. */
+export async function navigateTab(
+  tabId: number,
+  targetUrl: string,
+  originUrl: string,
+): Promise<PageRead> {
+  let resolved: string;
+  try {
+    resolved = new URL(targetUrl, originUrl).toString();
+  } catch {
+    throw new Error(`Invalid URL: ${targetUrl}`);
+  }
+  if (isRestrictedUrl(resolved)) {
+    throw new Error("That URL cannot be opened by Monacle");
+  }
+  if (!sameOrigin(resolved, originUrl)) {
+    throw new Error("Navigate is limited to the same site as this chat");
+  }
+
+  await chrome.tabs.update(tabId, { url: resolved });
+
+  const start = Date.now();
+  while (Date.now() - start < 20_000) {
+    await new Promise((r) => setTimeout(r, 200));
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status && tab.status !== "complete") continue;
+      if (isRestrictedUrl(tab.url || "")) {
+        throw new Error("Landed on a restricted page");
+      }
+      return await sendPageRead(tabId);
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        /restricted|same site|cannot be opened/i.test(err.message)
+      ) {
+        throw err;
+      }
+      // content script not ready yet
+    }
+  }
+  throw new Error("Timed out waiting for page after navigate");
 }
 
 export interface ContentPing {

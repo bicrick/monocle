@@ -39,10 +39,11 @@ export class StatelessLlmProvider implements AgentProvider {
     history: Array<{ role: "user" | "assistant"; content: string }>,
     pageContext: PageContext,
     _images?: import("../shared/types").PromptImage[],
+    _pageRead?: import("../shared/types").PageRead,
     signal?: AbortSignal,
   ): AsyncIterable<AgentEvent> {
     const contextBlock = [
-      "PAGE CONTEXT (sanitized):",
+      "TAB (light — fetch page text yourself only if your API stack supports tools; otherwise use this metadata):",
       JSON.stringify(
         {
           url: pageContext.url,
@@ -55,7 +56,7 @@ export class StatelessLlmProvider implements AgentProvider {
         2,
       ),
       "",
-      "USER REQUEST:",
+      "USER:",
       prompt,
     ].join("\n");
 

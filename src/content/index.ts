@@ -5,6 +5,7 @@ import {
 } from "./extensionContext";
 import { isolate } from "./isolate";
 import { captureSnapshot } from "./snapshot";
+import { capturePageRead } from "./pageRead";
 import {
   applyPatch,
   clearMemory,
@@ -85,6 +86,17 @@ chrome.runtime.onMessage.addListener(
         capturedAt: Date.now(),
       });
       sendResponse({ type: "SNAPSHOT", context: snap.value });
+      return true;
+    }
+    if (message.type === "GET_PAGE_READ") {
+      const read = isolate(capturePageRead, {
+        url: location.href,
+        title: document.title,
+        text: "",
+        links: [],
+        capturedAt: Date.now(),
+      });
+      sendResponse({ type: "PAGE_READ", page: read.value });
       return true;
     }
     if (message.type === "APPLY_PATCH") {

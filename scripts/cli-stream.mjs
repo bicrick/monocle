@@ -222,11 +222,15 @@ export function createStreamParser({
 
   function finalText() {
     if (sawResult && resultText) return resultText.trim();
-    // Deduplicate overlapping assistant chunks if CLI replayed full messages
     if (!assistantParts.length) return "";
-    const last = assistantParts[assistantParts.length - 1] || "";
-    // Prefer the longest chunk (often the full message after deltas)
-    let best = last;
+    // Prefer the last JSON / patch-looking chunk (final answer after tools),
+    // not an earlier short intent line like "I'll read the rest…".
+    for (let i = assistantParts.length - 1; i >= 0; i--) {
+      const part = (assistantParts[i] || "").trim();
+      if (!part) continue;
+      if (isPatchText(part) || /"message"\s*:/.test(part)) return part;
+    }
+    let best = assistantParts[assistantParts.length - 1] || "";
     for (const part of assistantParts) {
       if (part.length > best.length) best = part;
     }
