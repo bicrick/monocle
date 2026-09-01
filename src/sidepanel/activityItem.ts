@@ -52,6 +52,15 @@ function pinLogIfNeeded(detail: HTMLElement, stick: boolean): void {
   });
 }
 
+function guardHostScroll(detail: HTMLElement): void {
+  if (detail.dataset.scrollGuard === "1") return;
+  detail.dataset.scrollGuard = "1";
+  detail.dataset.stickBottom = "1";
+  detail.addEventListener("scroll", () => {
+    detail.dataset.stickBottom = isPinnedToBottom(detail) ? "1" : "0";
+  });
+}
+
 function existingLabel(item: HTMLLIElement): HTMLElement | null {
   return item.querySelector(".activity-item-label");
 }
@@ -106,18 +115,23 @@ function fillStepDetail(host: HTMLElement, line: ActivityLine): void {
         : "detail";
   if (host.dataset.raw === raw && host.dataset.kind === kind) return;
 
-  const stick = kind === "cli" && isPinnedToBottom(host);
+  guardHostScroll(host);
+  const stick =
+    host.dataset.stickBottom !== "0" && isPinnedToBottom(host);
   host.dataset.raw = raw;
   host.dataset.kind = kind;
   if (kind === "snapshot" || kind === "error") {
     host.classList.remove("activity-detail");
-    host.replaceChildren();
-    host.textContent = raw;
+    if (host.textContent !== raw) {
+      host.replaceChildren();
+      host.textContent = raw;
+    }
+    pinLogIfNeeded(host, stick);
   } else {
+    // In-place field updates preserve nested OUTPUT scroll positions.
     renderActivityDetail(host, raw);
+    pinLogIfNeeded(host, stick);
   }
-
-  if (kind === "cli") pinLogIfNeeded(host, stick);
 }
 
 function ensureStep(

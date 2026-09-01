@@ -135,6 +135,14 @@ export async function createSession(opts: {
   return session;
 }
 
+export async function deleteSession(id: string): Promise<boolean> {
+  const all = await readAll();
+  const next = all.filter((s) => s.id !== id);
+  if (next.length === all.length) return false;
+  await writeAll(next);
+  return true;
+}
+
 export async function saveSession(session: ChatSession): Promise<void> {
   session.updatedAt = Date.now();
   if (session.messages.length > MAX_MESSAGES) {
@@ -148,8 +156,8 @@ export async function saveSession(session: ChatSession): Promise<void> {
   }
   const all = await readAll();
   const idx = all.findIndex((s) => s.id === session.id);
-  if (idx >= 0) all[idx] = session;
-  else all.unshift(session);
+  if (idx < 0) return;
+  all[idx] = session;
   await writeAll(all);
 }
 

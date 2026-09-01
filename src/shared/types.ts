@@ -175,6 +175,7 @@ export type RuntimeMessage =
   | { type: "SESSIONS"; sessions: SessionSummary[] }
   | { type: "OPEN_SESSION"; tabId: number; sessionId: string }
   | { type: "NEW_SESSION"; tabId: number }
+  | { type: "DELETE_SESSION"; tabId: number; sessionId: string }
   | { type: "STOP_PROMPT"; tabId: number; sessionId?: string }
   | { type: "OPEN_OPTIONS" }
   | { type: "RUN_SANDBOX"; code: string; context: PageContext }

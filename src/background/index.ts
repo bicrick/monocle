@@ -368,6 +368,20 @@ async function handleStop(
   if (sessionId) await stopCompanionRun(sessionId);
 }
 
+/** Drop a deleted chat from every tab so an in-flight run cannot revive it. */
+async function forgetSession(sessionId: string): Promise<void> {
+  for (const [tabId, runtime] of tabs) {
+    if (runtime.chatSessionId !== sessionId) continue;
+    if (runtime.busy) await handleStop(tabId, sessionId);
+    runtime.chatSessionId = null;
+    runtime.agentSession = null;
+    runtime.activity = [];
+    runtime.busy = false;
+    runtime.abort = null;
+    runtime.pendingRepair = null;
+  }
+}
+
 async function handlePrompt(
   tabId: number,
   prompt: string,
@@ -631,10 +645,11 @@ async function handlePrompt(
       });
     }
   } finally {
-    // Clear busy before notifying the panel so GET_TAB_STATE / refreshState
-    // cannot re-apply busy=true after the composer unlocked.
-    runtime.busy = false;
-    runtime.abort = null;
+    // Only unlock this chat. A delete/switch mid-run must not clear a new one.
+    if (runtime.chatSessionId === sessionId) {
+      runtime.busy = false;
+      runtime.abort = null;
+    }
     broadcast(tabId, { type: "done" }, sessionId);
     const queued = runtime.pendingRepair;
     if (queued && !runtime.cancelled) {
@@ -788,6 +803,12 @@ chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendRespo
           pageUrl: created.url,
           createdAt: created.createdAt,
         };
+        sendResponse(await buildTabState(message.tabId));
+        break;
+      }
+      case "DELETE_SESSION": {
+        await forgetSession(message.sessionId);
+        await sessions.deleteSession(message.sessionId);
         sendResponse(await buildTabState(message.tabId));
         break;
       }

@@ -157,6 +157,9 @@ const history = createHistoryPanel({
   onSelect: (id) => {
     void openSession(id);
   },
+  onDelete: (id) => {
+    void deleteChat(id);
+  },
   onOpenPage: (url) => {
     void openSessionPage(url);
   },
@@ -220,6 +223,17 @@ async function newSession(): Promise<void> {
   })) as RuntimeMessage;
   applyTabState(res);
   promptEl.focus();
+}
+
+async function deleteChat(id: string): Promise<void> {
+  tabId = await resolveTabId();
+  if (tabId == null) return;
+  const res = (await chrome.runtime.sendMessage({
+    type: "DELETE_SESSION",
+    tabId,
+    sessionId: id,
+  })) as RuntimeMessage;
+  applyTabState(res);
 }
 
 async function sendPrompt(): Promise<void> {

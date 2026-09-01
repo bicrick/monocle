@@ -182,29 +182,72 @@ body {
 }
 
 .history-item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  border-radius: 6px;
+  padding: 2px 4px 2px 2px;
+  color: var(--text);
+}
+
+.history-item:hover,
+.history-item.is-active {
+  background: var(--user-well);
+}
+
+.history-item-main {
   appearance: none;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 1px;
-  width: 100%;
+  flex: 1 1 auto;
   min-width: 0;
   text-align: left;
   background: transparent;
   border: none;
-  border-radius: 6px;
-  padding: 7px 10px;
+  border-radius: 4px;
+  padding: 5px 8px;
   cursor: pointer;
-  color: var(--text);
+  color: inherit;
   font: inherit;
 }
 
-.history-item:hover {
-  background: var(--user-well);
+.history-item-delete {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
 }
 
-.history-item.is-active {
-  background: var(--user-well);
+.history-item:hover .history-item-delete,
+.history-item:focus-within .history-item-delete {
+  opacity: 1;
+}
+
+.history-item-delete:hover {
+  color: var(--text);
+  background: var(--border);
+}
+
+@media (hover: none) {
+  .history-item-delete {
+    opacity: 1;
+  }
 }
 
 .history-item-title {
@@ -327,7 +370,7 @@ body {
 .composer-row {
   display: flex;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-top: 6px;
 }
 
 .composer-well {

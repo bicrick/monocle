@@ -15,6 +15,7 @@ export function createHistoryPanel(opts: {
   titleBtn: HTMLButtonElement;
   stage: HTMLElement;
   onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
   onOpenPage: (url: string) => void;
 }): {
   render: (sessions: SessionSummary[], activeId: string | null) => void;
@@ -35,9 +36,10 @@ export function createHistoryPanel(opts: {
     opts.panel.inert = !next;
     if (next) {
       const current = opts.list.querySelector<HTMLElement>(
-        ".history-item.is-active",
+        ".history-item.is-active .history-item-main",
       );
-      (current ?? opts.list.querySelector<HTMLElement>(".history-item"))?.focus();
+      (current ??
+        opts.list.querySelector<HTMLElement>(".history-item-main"))?.focus();
     } else {
       opts.toggle.focus();
     }
@@ -78,11 +80,14 @@ export function createHistoryPanel(opts: {
     renderTitle(active);
 
     for (const s of visible) {
+      const row = document.createElement("div");
+      row.className = "history-item";
+      if (s.id === activeId) row.classList.add("is-active");
+      row.setAttribute("role", "listitem");
+
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "history-item";
-      if (s.id === activeId) btn.classList.add("is-active");
-      btn.setAttribute("role", "listitem");
+      btn.className = "history-item-main";
       btn.title = displaySessionTitle(s);
 
       const title = document.createElement("span");
@@ -100,7 +105,21 @@ export function createHistoryPanel(opts: {
         close();
         opts.onSelect(s.id);
       });
-      opts.list.append(btn);
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "history-item-delete";
+      del.title = "Delete chat";
+      del.setAttribute("aria-label", `Delete ${displaySessionTitle(s)}`);
+      del.textContent = "×";
+      del.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        opts.onDelete(s.id);
+      });
+
+      row.append(btn, del);
+      opts.list.append(row);
     }
 
     if (!visible.length) {
@@ -108,6 +127,14 @@ export function createHistoryPanel(opts: {
       empty.className = "history-empty";
       empty.textContent = "No chats yet";
       opts.list.append(empty);
+    }
+
+    if (open && !opts.list.contains(document.activeElement)) {
+      const current = opts.list.querySelector<HTMLElement>(
+        ".history-item.is-active .history-item-main",
+      );
+      (current ??
+        opts.list.querySelector<HTMLElement>(".history-item-main"))?.focus();
     }
   }
 

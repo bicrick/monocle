@@ -61,6 +61,7 @@ chrome.runtime.onMessage.addListener(
       message.type === "LIST_SESSIONS" ||
       message.type === "OPEN_SESSION" ||
       message.type === "NEW_SESSION" ||
+      message.type === "DELETE_SESSION" ||
       message.type === "INJECT_THREE_STAGE" ||
       message.type === "CONTENT_READY" ||
       (message.type === "RESET" && "tabId" in message && message.tabId != null)
