@@ -21,14 +21,11 @@
   <img src="https://img.shields.io/badge/Cursor%20CLI-111111?style=flat-square" alt="Cursor CLI" />
 </p>
 
-<p align="center">
-  <img src="docs/readme/wordle-before.png" alt="Wordle before Monocle" width="720" />
-</p>
-
 <p align="center"><em>Make this medieval themed</em></p>
 
 <p align="center">
-  <img src="docs/readme/wordle-after.png" alt="Wordle after Monocle medieval restyle" width="720" />
+  <img src="docs/readme/wordle-before.png" alt="Wordle before" width="49%" />
+  <img src="docs/readme/wordle-after.png" alt="Wordle after medieval restyle" width="49%" />
 </p>
 
 ## How it works
