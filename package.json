@@ -2,6 +2,26 @@
   "name": "monocle",
   "version": "0.1.0",
   "private": true,
+  "description": "Chrome extension that restyles the live tab with your local Cursor CLI — site JS and media keep running.",
+  "homepage": "https://bicrick.com",
+  "license": "MIT",
+  "author": "Patrick Brown",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bicrick/monocle.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bicrick/monocle/issues"
+  },
+  "keywords": [
+    "chrome-extension",
+    "cursor",
+    "typescript",
+    "vite",
+    "crxjs",
+    "threejs",
+    "manifest-v3"
+  ],
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
