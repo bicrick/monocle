@@ -17,32 +17,13 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2ea44f?style=flat-square" alt="License: MIT" /></a>
-  <img src="https://img.shields.io/badge/Open%20Source-Yes-0a7ea4?style=flat-square" alt="Open Source" />
-  <a href="https://bicrick.com"><img src="https://img.shields.io/badge/Website-bicrick.com-0a7ea4?style=flat-square" alt="Website" /></a>
-  <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Vite-646CFF?style=flat-square&logo=vite&logoColor=white" alt="Vite" />
-  <img src="https://img.shields.io/badge/CRXJS-0a7ea4?style=flat-square" alt="CRXJS" />
   <img src="https://img.shields.io/badge/Chrome%20Extension-MV3-4285F4?style=flat-square&logo=googlechrome&logoColor=white" alt="Chrome Extension MV3" />
-  <img src="https://img.shields.io/badge/Three.js-000000?style=flat-square&logo=threedotjs&logoColor=white" alt="Three.js" />
-  <img src="https://img.shields.io/badge/Node.js-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js" />
   <img src="https://img.shields.io/badge/Cursor%20CLI-111111?style=flat-square" alt="Cursor CLI" />
 </p>
 
 ## How it works
 
 Monocle is a Chrome extension that snapshots the open tab, talks to a local companion, and applies sandboxed scene patches — CSS, overlay HTML, DOM ops, and optional Three.js — without killing the page’s own scripts or media.
-
-```
-Live Chrome tab
-      │
-      ▼
-Monocle extension  ──POST /restyle──►  Companion (127.0.0.1:8787)
-      ▲                                      │
-      │                                      ▼
-      │                               Cursor CLI (`agent -p`)
-      │                                      │
-      └──────── MCP monacle-tab ◄────────────┘
-```
 
 Default provider: **Cursor CLI on this machine**. No cloud API key required. Anthropic / OpenAI / xAI remain optional fallbacks. Persistent remote machines later use the same `/restyle` contract.
 
